@@ -510,12 +510,18 @@ export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
             <div className="text-xs font-bold text-stone-100 truncate">
               {isMoveGhost ? 'Move' : 'Place'} {ghostDef.name} ({ghostFp.width}×{ghostFp.height})
             </div>
-            <div className="text-[11px] text-stone-300 truncate tabular-nums">
-              {ghostInfo
-                ? ghostInfo.valid
-                  ? `Tile (${ghostInfo.gx}, ${ghostInfo.gy}) · Tap Confirm or tap tile again`
-                  : ghostInfo.reason
-                : 'Tap any flat cleared tile'}
+            <div className={`text-[11px] tabular-nums ${ghostInfo && !ghostInfo.valid ? 'text-amber-300' : 'text-stone-300'} ${ghostDef.isConnectorStructure ? 'leading-snug' : 'truncate'}`}>
+              {ghostDef.isConnectorStructure
+                ? ghostInfo
+                  ? ghostInfo.valid
+                    ? `Border spot (${ghostInfo.gx}, ${ghostInfo.gy}) ready · Tap Build, then connect an owned road to any side`
+                    : ghostInfo.reason
+                  : 'Place 1×3 (or tap Rotate for 3×1) on the final owned border tiles on any side, then connect a road'
+                : ghostInfo
+                  ? ghostInfo.valid
+                    ? `Tile (${ghostInfo.gx}, ${ghostInfo.gy}) · Tap Confirm or tap tile again`
+                    : ghostInfo.reason
+                  : 'Tap any flat cleared tile'}
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">

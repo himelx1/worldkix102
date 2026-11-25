@@ -136,6 +136,7 @@ export class RoadNetworkSystem {
   } {
     let touchesOwnedRoad = false;
     let touchesLockedRoad = false;
+    let touchesLockedLand = false;
     for (const [dx, dy] of [
       [0, -1],
       [1, 0],
@@ -144,21 +145,23 @@ export class RoadNetworkSystem {
     ]) {
       const nx = gx + dx;
       const ny = gy + dy;
+      const unlocked = chunks.isUnlocked(nx, ny);
+      if (!unlocked) touchesLockedLand = true;
       const nb = chunks.getTile(nx, ny);
       const nrt = nb.chunk.roadType[nb.index] as RoadType;
       if (nrt === RoadType.None || nrt === RoadType.Rail) continue;
-      if (chunks.isUnlocked(nx, ny)) touchesOwnedRoad = true;
+      if (unlocked) touchesOwnedRoad = true;
       else touchesLockedRoad = true;
     }
 
-    const connected = touchesOwnedRoad && touchesLockedRoad;
-    const statusText = connected
-      ? 'Connected: Bridging Owned <-> Locked Roads'
-      : !touchesOwnedRoad && !touchesLockedRoad
-        ? 'Disconnected: Place adjacent to both owned and locked roads'
-        : !touchesOwnedRoad
-          ? 'Incomplete: Missing connection to owned-area road'
-          : 'Incomplete: Missing connection to locked-area road';
+    const connected = touchesOwnedRoad && (touchesLockedRoad || touchesLockedLand);
+    const statusText = !touchesLockedLand
+      ? 'Not on border: Place on final owned border tiles touching locked land'
+      : !touchesOwnedRoad
+        ? 'Waiting for road: Connect an owned road to this Connector'
+        : touchesLockedRoad
+          ? 'Connected: Bridging Owned Road ↔ Locked-Area Road'
+          : 'Border Gate Active: Owned road connected to locked frontier';
 
     return {
       connected,
@@ -166,6 +169,60 @@ export class RoadNetworkSystem {
       touchesOwnedRoad,
       touchesLockedRoad,
       clusterId: this.getRoadClusterId(gx, gy),
+    };
+  }
+
+  public evaluateConnectorBuildingStatus(
+    b: BuildingInstance,
+    chunks: ChunkManager
+  ): {
+    connected: boolean;
+    statusText: string;
+    touchesOwnedRoad: boolean;
+    touchesLockedRoad: boolean;
+    touchesLockedLand: boolean;
+    clusterId: number;
+  } {
+    const def = BUILDINGS[b.defId];
+    const fp = def ? getBuildingFootprint(def, b.rotation ?? 0) : { width: 1, height: 3 };
+    let touchesOwnedRoad = false;
+    let touchesLockedRoad = false;
+    let touchesLockedLand = false;
+
+    for (let dx = -1; dx <= fp.width; dx++) {
+      for (let dy = -1; dy <= fp.height; dy++) {
+        const isEdge =
+          ((dx === -1 || dx === fp.width) && dy >= 0 && dy < fp.height) ||
+          ((dy === -1 || dy === fp.height) && dx >= 0 && dx < fp.width);
+        if (!isEdge) continue;
+        const nx = b.gx + dx;
+        const ny = b.gy + dy;
+        const unlocked = chunks.isUnlocked(nx, ny);
+        if (!unlocked) touchesLockedLand = true;
+        const nb = chunks.getTile(nx, ny);
+        const nrt = nb.chunk.roadType[nb.index] as RoadType;
+        if (nrt === RoadType.None || nrt === RoadType.Rail) continue;
+        if (unlocked) touchesOwnedRoad = true;
+        else touchesLockedRoad = true;
+      }
+    }
+
+    const connected = touchesOwnedRoad && touchesLockedLand;
+    const statusText = !touchesLockedLand
+      ? 'Not on border: Move to the final owned border tiles touching locked land'
+      : !touchesOwnedRoad
+        ? 'Waiting for road: Connect any owned road to this 1×3 Connector'
+        : touchesLockedRoad
+          ? 'Connected: Owned Road ↔ Locked-Area Road Bridged'
+          : 'Border Gate Active: Owned Road Connected (Trucks can cross to reach nearby locked land)';
+
+    return {
+      connected,
+      statusText,
+      touchesOwnedRoad,
+      touchesLockedRoad,
+      touchesLockedLand,
+      clusterId: this.getRoadClusterId(b.gx, b.gy),
     };
   }
 

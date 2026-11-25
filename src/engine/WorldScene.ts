@@ -1685,10 +1685,26 @@ export class WorldScene extends Phaser.Scene {
 
     const bounds = this.getVisibleGridBounds();
     if (!inLandMode) {
+      for (const b of this.engine.state.buildings) {
+        if (b.defId !== 'road_connector') continue;
+        const fp = getBuildingFootprint(BUILDINGS[b.defId], b.rotation ?? 0);
+        const cx = b.gx + (fp.width - 1) * 0.5;
+        const cy = b.gy + (fp.height - 1) * 0.5;
+        const status = this.engine.roadNet.evaluateConnectorBuildingStatus(b, this.engine.chunks);
+        const elev = this.getTileElev(Math.round(cx), Math.round(cy));
+        const { sx, sy } = gridToIso(cx, cy, elev);
+        const col = status.connected ? 0x22c55e : status.touchesLockedLand ? 0xf59e0b : 0xef4444;
+        gfx.lineStyle(2.2, col, 0.95);
+        gfx.strokeEllipse(sx, sy + 16, 30, 16);
+        gfx.fillStyle(col, 0.95);
+        gfx.fillCircle(sx, sy - 6, 3.8);
+      }
+
       for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
         for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
           const { chunk, index } = this.engine.chunks.getTile(gx, gy);
           if ((chunk.roadType[index] as RoadType) !== RoadType.Connector) continue;
+          if (chunk.buildingRef[index] !== -1) continue;
           const status = this.engine.roadNet.evaluateConnectorStatus(gx, gy, this.engine.chunks);
           const elev = chunk.elevation[index];
           const { sx, sy } = gridToIso(gx, gy, elev);

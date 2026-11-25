@@ -1613,6 +1613,10 @@ function drawBuildingSprite(
     drawCoastalPort(ctx, pTop, pRight, pBottom, pLeft, cx, cy, def, tier);
     return;
   }
+  if (def.id === 'road_connector') {
+    drawRoadConnectorGate(ctx, pTop, pRight, pBottom, pLeft, cx, cy, def);
+    return;
+  }
   if (
     def.id === 'train_station' ||
     def.id === 'airport' ||
@@ -2098,6 +2102,71 @@ function drawCoastalPort(
     ctx.fillStyle = '#38bdf8';
     ctx.fillRect(cx + 9, cy - 6, 10, 6);
   }
+}
+
+function drawRoadConnectorGate(
+  ctx: CanvasRenderingContext2D,
+  pTop: { x: number; y: number },
+  pRight: { x: number; y: number },
+  pBottom: { x: number; y: number },
+  pLeft: { x: number; y: number },
+  cx: number,
+  cy: number,
+  def: BuildingDef
+): void {
+  const lerpPt = (a: { x: number; y: number }, b: { x: number; y: number }, t: number) => ({
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  });
+
+  // Heavy asphalt bridge deck over the 1x3 / 3x1 plinth
+  const deckInset = 0.08;
+  const dTop = lerpPt(pTop, pBottom, deckInset);
+  const dBot = lerpPt(pBottom, pTop, deckInset);
+  const dLeft = lerpPt(pLeft, pRight, deckInset);
+  const dRight = lerpPt(pRight, pLeft, deckInset);
+  ctx.fillStyle = '#334155';
+  ctx.beginPath();
+  ctx.moveTo(dTop.x, dTop.y - 3);
+  ctx.lineTo(dRight.x, dRight.y - 3);
+  ctx.lineTo(dBot.x, dBot.y - 3);
+  ctx.lineTo(dLeft.x, dLeft.y - 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // Road surface stripe along the middle of the connector span
+  const roadW = def.width >= def.height;
+  const s1 = roadW ? lerpPt(pTop, pLeft, 0.5) : lerpPt(pTop, pRight, 0.5);
+  const s2 = roadW ? lerpPt(pRight, pBottom, 0.5) : lerpPt(pLeft, pBottom, 0.5);
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2.4;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  ctx.moveTo(s1.x, s1.y - 3);
+  ctx.lineTo(s2.x, s2.y - 3);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Border gatehouse pillars & overhead amber checkpoint gantry in center
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(pLeft.x + (cx - pLeft.x) * 0.25, pLeft.y + (cy - pLeft.y) * 0.25 - 3);
+  ctx.lineTo(pTop.x + (cx - pTop.x) * 0.25, pTop.y + (cy - pTop.y) * 0.25 - 3);
+  ctx.moveTo(pRight.x + (cx - pRight.x) * 0.25, pRight.y + (cy - pRight.y) * 0.25 - 3);
+  ctx.lineTo(pBottom.x + (cx - pBottom.x) * 0.25, pBottom.y + (cy - pBottom.y) * 0.25 - 3);
+  ctx.stroke();
+
+  // Checkpoint gantry & guard booth
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(cx - 12, cy - 22, 4, 18);
+  ctx.fillRect(cx + 8, cy - 22, 4, 18);
+  ctx.fillStyle = '#f59e0b';
+  ctx.fillRect(cx - 14, cy - 25, 28, 5);
+  ctx.fillStyle = '#22c55e';
+  ctx.beginPath();
+  ctx.arc(cx, cy - 22.5, 2.4, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function drawTransportHub(

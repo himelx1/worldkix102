@@ -958,8 +958,13 @@ export class CoreEngine {
       }
 
       case 'DEMOLISH_BUILDING': {
+        const prev = this.state.buildings.find((item) => item.id === cmd.buildingId);
         const ok = this.buildingSys.demolishBuilding(cmd.buildingId, this.state, this.chunks);
         if (!ok) return { ok: false, reason: 'Cannot demolish' };
+        if (prev && BUILDINGS[prev.defId]?.isConnectorStructure) {
+          this.roadNet.markDirty();
+          this.roadNet.recomputeIfDirty(this.chunks, this.state);
+        }
         this.workforce.assignWorkers(this.state);
         CitizenAccounting.reconcileCohorts(this.state);
         this.emit({ type: 'STATE_CHANGED' });
@@ -1585,9 +1590,11 @@ export class CoreEngine {
       roadCongestion: hasRoad ? this.roadNet.getTileCongestion(gx, gy) : 0,
       roadDisconnected: hasRoad ? this.roadNet.isRoadDisconnected(gx, gy) : false,
       connectorStatus:
-        chunk.roadType[index] === RoadType.Connector
-          ? this.roadNet.evaluateConnectorStatus(gx, gy, this.chunks)
-          : undefined,
+        building?.defId === 'road_connector'
+          ? this.roadNet.evaluateConnectorBuildingStatus(building, this.chunks)
+          : chunk.roadType[index] === RoadType.Connector
+            ? this.roadNet.evaluateConnectorStatus(gx, gy, this.chunks)
+            : undefined,
     };
   }
 }

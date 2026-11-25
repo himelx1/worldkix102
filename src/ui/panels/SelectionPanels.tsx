@@ -135,6 +135,32 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
 
           <p className="text-xs text-stone-300 leading-relaxed">{def.description}</p>
 
+          {def.isConnectorStructure ? (() => {
+            const cStatus = GameController.engine.roadNet.evaluateConnectorBuildingStatus(
+              b,
+              GameController.engine.chunks
+            );
+            return (
+              <div
+                className={`p-3 rounded-xl border space-y-1.5 text-xs ${
+                  cStatus.connected
+                    ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-200'
+                    : 'bg-amber-950/55 border-amber-600/60 text-amber-200'
+                }`}
+              >
+                <div className="font-bold">
+                  {cStatus.connected ? 'Connector Active' : 'Connector Needs Road'}
+                </div>
+                <div className="text-[11px] leading-snug">{cStatus.statusText}</div>
+                {!cStatus.touchesOwnedRoad ? (
+                  <div className="text-[11px] text-stone-300">
+                    Next step: Open Build → Roads &amp; Transit and connect any road up to any tile of this 1×3 structure.
+                  </div>
+                ) : null}
+              </div>
+            );
+          })() : null}
+
           {/* Automated Logging Center Dedicated Readout & Forest Permit Button */}
           {def.isAutomatedLogging ? (() => {
             const trucks = GameController.engine.logistics.loggingTrucks.filter((t) => t.factoryId === b.id);

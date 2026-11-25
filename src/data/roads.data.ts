@@ -399,7 +399,6 @@ export const BUILDABLE_ROADS: RoadDef[] = [
   ROADS[RoadType.TwoLane],
   ROADS[RoadType.ThreeLane],
   ROADS[RoadType.IndustrialRoad],
-  ROADS[RoadType.Connector],
   ROADS[RoadType.Roundabout],
   ROADS[RoadType.ParkingLot],
   ROADS[RoadType.Paved],

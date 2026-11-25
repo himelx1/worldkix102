@@ -40,9 +40,9 @@ export class PathfindingSystem {
   ): boolean {
     const { chunk, index } = chunks.getTile(gx, gy);
     const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
-    if (chunk.buildingRef[index] !== -1) return false;
-
     const road = chunk.roadType[index] as RoadType;
+    if (chunk.buildingRef[index] !== -1 && road !== RoadType.Connector) return false;
+
     const biome = chunk.biomeId[index] as BiomeId;
     const isWater = chunks.isWaterBiome(biome);
 

@@ -206,6 +206,8 @@ export class BuildingSystem {
       summaryReason = `Place over a ${requiredDepositName} tile`;
     } else if (def.requiresCoast) {
       summaryReason = 'Place touching a River or Ocean tile';
+    } else if (def.isConnectorStructure) {
+      summaryReason = 'Place on the final owned border tiles (1×3 or 3×1) touching locked land';
     }
 
     return {
@@ -487,6 +489,30 @@ export class BuildingSystem {
       }
     }
 
+    if (def.isConnectorStructure) {
+      let touchesLockedBorder = false;
+      borderCheck: for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          const isEdge =
+            ((dx === -1 || dx === fp.width) && dy >= 0 && dy < fp.height) ||
+            ((dy === -1 || dy === fp.height) && dx >= 0 && dx < fp.width);
+          if (!isEdge) continue;
+          if (!chunks.isUnlocked(gx + dx, gy + dy)) {
+            touchesLockedBorder = true;
+            break borderCheck;
+          }
+        }
+      }
+      if (!touchesLockedBorder) {
+        return {
+          valid: false,
+          missingCoins: req.missingCoins,
+          missingMaterials: req.missingMaterials,
+          reason: 'Place on the final owned border tiles touching locked land (use Rotate for 1×3 or 3×1 on any side)',
+        };
+      }
+    }
+
     if (req.missingCoins > 0 || req.missingMaterials.length > 0) {
       return {
         valid: false,
@@ -521,6 +547,7 @@ export class BuildingSystem {
     const blueprintLevel = Math.min(def.maxLevel, Math.max(1, state.unlockedBuildingLevels?.[defId] ?? 1));
     const ownerCityId = chunks.getTileCityId(gx, gy) || state.activeCityId || 1;
     const id = state.nextBuildingId++;
+    const instantActive = Boolean(def.isConnectorStructure);
     const building: BuildingInstance = {
       id,
       defId,
@@ -529,8 +556,8 @@ export class BuildingSystem {
       rotation,
       cityId: ownerCityId,
       level: blueprintLevel,
-      status: 'constructing',
-      buildProgress: 0,
+      status: instantActive ? 'active' : 'constructing',
+      buildProgress: instantActive ? 1 : 0,
       prodProgress: 0,
       assignedWorkers: 0,
       lockedWorkers: null,
@@ -543,11 +570,22 @@ export class BuildingSystem {
         const { cx, cy, index } = gridToChunk(gx + dx, gy + dy);
         const chunk = chunks.getOrCreateChunk(cx, cy);
         chunk.buildingRef[index] = id;
+        if (def.isConnectorStructure) {
+          chunk.roadType[index] = RoadType.Connector;
+          chunks.markRoadNeighborsRenderDirty(gx + dx, gy + dy);
+        }
         chunks.markChunkModified(cx, cy);
       }
     }
 
     state.buildings.push(building);
+    if (instantActive) {
+      state.stats.buildingsBuilt += 1;
+    }
+    if (def.isConnectorStructure) {
+      roadNet.markDirty();
+      roadNet.recomputeIfDirty(chunks, state);
+    }
     roadNet.evaluateBuildingRoadAccess(building, chunks);
     return { ok: true, building };
   }
@@ -763,7 +801,7 @@ export class BuildingSystem {
         if (chunk.buildingRef[index] !== -1 && chunk.buildingRef[index] !== buildingId) {
           return { valid: false, reason: 'Footprint overlaps another building' };
         }
-        if (chunk.roadType[index] !== RoadType.None) {
+        if (chunk.roadType[index] !== RoadType.None && !(def.isConnectorStructure && chunk.buildingRef[index] === buildingId)) {
           return { valid: false, reason: 'Clear road on target plot first' };
         }
         if (chunk.featureType[index] !== FeatureType.None) {
@@ -804,6 +842,28 @@ export class BuildingSystem {
       }
     }
 
+    if (def.isConnectorStructure) {
+      let touchesLockedBorder = false;
+      borderCheck: for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          const isEdge =
+            ((dx === -1 || dx === fp.width) && dy >= 0 && dy < fp.height) ||
+            ((dy === -1 || dy === fp.height) && dx >= 0 && dx < fp.width);
+          if (!isEdge) continue;
+          if (!chunks.isUnlocked(newGx + dx, newGy + dy)) {
+            touchesLockedBorder = true;
+            break borderCheck;
+          }
+        }
+      }
+      if (!touchesLockedBorder) {
+        return {
+          valid: false,
+          reason: 'Place on the final owned border tiles touching locked land (use Rotate for 1×3 or 3×1 on any side)',
+        };
+      }
+    }
+
     return { valid: true };
   }
 
@@ -831,6 +891,10 @@ export class BuildingSystem {
         const chunk = chunks.getOrCreateChunk(cx, cy);
         if (chunk.buildingRef[index] === b.id) {
           chunk.buildingRef[index] = -1;
+          if (def.isConnectorStructure && chunk.roadType[index] === RoadType.Connector) {
+            chunk.roadType[index] = RoadType.None;
+            chunks.markRoadNeighborsRenderDirty(b.gx + dx, b.gy + dy);
+          }
           chunks.markChunkModified(cx, cy);
         }
       }
@@ -848,6 +912,10 @@ export class BuildingSystem {
         const { cx, cy, index } = gridToChunk(newGx + dx, newGy + dy);
         const chunk = chunks.getOrCreateChunk(cx, cy);
         chunk.buildingRef[index] = b.id;
+        if (def.isConnectorStructure) {
+          chunk.roadType[index] = RoadType.Connector;
+          chunks.markRoadNeighborsRenderDirty(newGx + dx, newGy + dy);
+        }
         chunks.markChunkModified(cx, cy);
       }
     }
@@ -874,6 +942,9 @@ export class BuildingSystem {
     const existingRoad = chunk.roadType[index] as RoadType;
     if (existingRoad === RoadType.None) {
       return { ok: false, reason: 'No road on this tile', refundCoins: 0 };
+    }
+    if (chunk.buildingRef[index] !== -1) {
+      return { ok: false, reason: 'Use Remove / Demolish on the Road Connector structure', refundCoins: 0 };
     }
     const prevDef = ROADS[existingRoad];
     const refundCoins = Math.round((prevDef?.coinCost ?? 0) * 0.5);
@@ -909,6 +980,10 @@ export class BuildingSystem {
           const chunk = chunks.getOrCreateChunk(cx, cy);
           if (chunk.buildingRef[index] === b.id) {
             chunk.buildingRef[index] = -1;
+            if (def.isConnectorStructure && chunk.roadType[index] === RoadType.Connector) {
+              chunk.roadType[index] = RoadType.None;
+              chunks.markRoadNeighborsRenderDirty(b.gx + dx, b.gy + dy);
+            }
             chunks.markChunkModified(cx, cy);
           }
         }

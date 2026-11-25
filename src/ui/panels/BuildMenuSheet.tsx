@@ -446,6 +446,26 @@ export const BuildMenuSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               Remove Mode
             </button>
           </div>
+          <div className="p-2.5 rounded-xl bg-[#0a1d14] border border-amber-500/45 flex items-center justify-between gap-2.5 text-xs">
+            <div className="min-w-0">
+              <div className="font-bold text-amber-300">
+                Road Connector (1×3 Border Structure)
+              </div>
+              <div className="text-[11px] text-stone-300 leading-snug mt-0.5">
+                Place on the final owned border block on any side (rotate 1×3 or 3×1), then connect your road to it.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                GameController.setTool({ mode: 'build', defId: 'road_connector', rotation: 0 });
+                GameController.setActiveSheet('none');
+              }}
+              className="min-h-[40px] px-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-bold text-xs shrink-0"
+            >
+              Place 1×3
+            </button>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             {BUILDABLE_ROADS.filter((r) => !q || r.name.toLowerCase().includes(q)).map((road) => {
               const levelOk = state.level >= road.unlockLevel;
@@ -496,11 +516,7 @@ export const BuildMenuSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
                               road.requiredTech ? ` · ${TECH_MAP[road.requiredTech]?.name}` : ''
                             }`}
                       </div>
-                      {road.id === RoadType.Connector ? (
-                        <div className="text-[10px] font-medium text-emerald-300/90 mt-0.5 truncate">
-                          Bridge owned border road ↔ locked forest road
-                        </div>
-                      ) : road.id === RoadType.ThreeLane ? (
+                      {road.id === RoadType.ThreeLane ? (
                         <div className="text-[10px] font-medium text-sky-300/90 mt-0.5 truncate">
                           3-Lane urban road with separated sidewalks
                         </div>

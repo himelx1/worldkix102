@@ -100,6 +100,7 @@ export interface BuildingDef {
   storageCapacityBonus?: number;
   isAutomatedLogging?: boolean;
   permitsLockedForest?: boolean;
+  isConnectorStructure?: boolean;
   transitKind?: 'bus' | 'taxi' | 'rail' | 'metro' | 'air' | 'sea';
   exportsSurplus?: boolean;
   importsUnavailable?: boolean;
@@ -2955,6 +2956,32 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     roofColor: '#1e293b',
     wallColor: '#475569',
     xpOnBuild: 460,
+  },
+  road_connector: {
+    id: 'road_connector',
+    name: 'Road Connector',
+    category: 'transportation',
+    subCategory: 'transit',
+    description:
+      '1×3 border gatehouse structure placed on the final owned tiles along any side of your territory (rotate 1×3 or 3×1). Connect any owned road to this structure to route vehicles & logging trucks into adjacent locked land.',
+    unlockLevel: 1,
+    coinCost: 40,
+    materialCost: { wood: 6, stone: 4 },
+    width: 1,
+    height: 3,
+    footprintRotatable: true,
+    buildTime: 1,
+    minWorkers: 0,
+    maxWorkers: 0,
+    workerClass: 'laborer',
+    upkeepPerMin: 2,
+    maxLevel: 1,
+    requiresRoad: false,
+    isConnectorStructure: true,
+    accentColor: '#f59e0b',
+    roofColor: '#334155',
+    wallColor: '#cbd5e1',
+    xpOnBuild: 20,
   },
   ...EXPANSION_BUILDINGS,
 };
