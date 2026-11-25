@@ -106,40 +106,6 @@ export const SimInspectorDrawer: React.FC<{ snap: GameSnapshot }> = ({ snap }) =
                   </button>
                 ))}
               </div>
-              <div className="grid grid-cols-2 gap-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    GameController.dispatch({
-                      type: 'TOGGLE_ZONE_BORDERS',
-                      enabled: !state.showZoneBorders,
-                    })
-                  }
-                  className={`min-h-[36px] px-2 rounded-lg text-[11px] font-bold border ${
-                    state.showZoneBorders
-                      ? 'bg-emerald-500 border-emerald-400 text-stone-950'
-                      : 'bg-[#07130d] border-emerald-900/60 text-stone-300'
-                  }`}
-                >
-                  Zone Borders: {state.showZoneBorders ? 'ON' : 'OFF'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    GameController.dispatch({
-                      type: 'TOGGLE_LAND_MODE',
-                      enabled: !state.landModeActive,
-                    })
-                  }
-                  className={`min-h-[36px] px-2 rounded-lg text-[11px] font-bold border ${
-                    state.landModeActive
-                      ? 'bg-amber-400 border-amber-300 text-stone-950'
-                      : 'bg-[#07130d] border-emerald-900/60 text-stone-300'
-                  }`}
-                >
-                  Land Mode: {state.landModeActive ? 'ON' : 'OFF'}
-                </button>
-              </div>
             </div>
 
             <div className="p-3 rounded-xl bg-[#0d2117] border border-emerald-800/60 space-y-1.5">

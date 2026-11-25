@@ -27,6 +27,8 @@ export type ActiveSheet =
 
 export type ActiveModal = 'none' | 'pause' | 'settings' | 'saves';
 
+export type ActiveToolPanel = 'none' | 'brush' | 'view';
+
 export interface GhostInfoState {
   gx: number;
   gy: number;
@@ -57,6 +59,7 @@ export interface GameSnapshot {
   selectedBuildingId: number | null;
   ghostInfo: GhostInfoState | null;
   activeSheet: ActiveSheet;
+  activeToolPanel: ActiveToolPanel;
   activeModal: ActiveModal;
   simInspectorOpen: boolean;
   toastError: string | null;
@@ -80,6 +83,10 @@ class GameControllerImpl {
   private selectedBuildingId: number | null = null;
   private ghostInfo: GhostInfoState | null = null;
   private activeSheet: ActiveSheet = 'none';
+  private activeToolPanel: ActiveToolPanel = 'none';
+  private lastBrushKind: 'water' | 'land' | 'unlock' | 'zone' | 'logging_permit' | 'clear_permit' = 'water';
+  private lastBrushRadius = 0;
+  private lastBrushZone: import('../../core/GameState').ZoneType = 'residential';
   private activeModal: ActiveModal = 'none';
   private simInspectorOpen = false;
   private toastError: string | null = null;
@@ -339,11 +346,74 @@ class GameControllerImpl {
     this.tool = tool;
     this.panMode = false;
     this.ghostInfo = null;
+    if (tool.mode !== 'terrain_brush' && this.activeToolPanel === 'brush') {
+      this.activeToolPanel = 'none';
+    }
     if (tool.mode !== 'inspect_chop') {
       this.selectedTileCoords = null;
       this.selectedBuildingId = null;
     }
     this.phaserHost?.worldScene.setTool(tool);
+    this.notifyImmediate();
+  }
+
+  public setActiveToolPanel(panel: ActiveToolPanel): void {
+    this.audio.unlock();
+    this.audio.play('ui');
+    const next: ActiveToolPanel = this.activeToolPanel === panel ? 'none' : panel;
+    this.activeToolPanel = next;
+
+    if (next !== 'none') {
+      this.activeSheet = 'none';
+      this.selectedBuildingId = null;
+      this.selectedTileCoords = null;
+      this.ghostInfo = null;
+    }
+
+    if (next === 'brush') {
+      const keepPan = this.panMode;
+      this.tool = {
+        mode: 'terrain_brush',
+        brush: this.lastBrushKind,
+        radius: this.lastBrushRadius,
+        zoneType: this.lastBrushKind === 'zone' ? this.lastBrushZone : undefined,
+      };
+      this.phaserHost?.worldScene.setTool(this.tool);
+      this.phaserHost?.worldScene.setPanMode(keepPan);
+    } else if (next === 'none' && (this.tool.mode === 'terrain_brush' || this.tool.mode === 'terraform' || this.tool.mode === 'land_unlock')) {
+      this.tool = { mode: 'inspect_chop' };
+      this.panMode = false;
+      this.phaserHost?.worldScene.setTool(this.tool);
+      this.phaserHost?.worldScene.setPanMode(false);
+    }
+
+    this.notifyImmediate();
+  }
+
+  public updateBrushConfig(opts: {
+    brush?: 'water' | 'land' | 'unlock' | 'zone' | 'logging_permit' | 'clear_permit';
+    radius?: number;
+    zoneType?: import('../../core/GameState').ZoneType;
+  }): void {
+    this.audio.unlock();
+    this.audio.play('ui');
+    if (opts.brush !== undefined) this.lastBrushKind = opts.brush;
+    if (opts.radius !== undefined) {
+      this.lastBrushRadius = Math.max(0, Math.min(6, Math.floor(opts.radius)));
+    }
+    if (opts.zoneType !== undefined) this.lastBrushZone = opts.zoneType;
+
+    this.activeToolPanel = 'brush';
+    this.activeSheet = 'none';
+    const keepPan = this.panMode;
+    this.tool = {
+      mode: 'terrain_brush',
+      brush: this.lastBrushKind,
+      radius: this.lastBrushRadius,
+      zoneType: this.lastBrushKind === 'zone' ? this.lastBrushZone : undefined,
+    };
+    this.phaserHost?.worldScene.setTool(this.tool);
+    this.phaserHost?.worldScene.setPanMode(keepPan);
     this.notifyImmediate();
   }
 
@@ -365,9 +435,10 @@ class GameControllerImpl {
   }
 
   public startTerraformTool(action: 'to_land' | 'to_water'): void {
-    this.setTool({ mode: 'terraform', action });
-    this.activeSheet = 'none';
-    this.notifyImmediate();
+    this.updateBrushConfig({
+      brush: action === 'to_water' ? 'water' : 'land',
+      radius: 0,
+    });
   }
 
   public startMoveBuilding(buildingId: number): void {
@@ -484,16 +555,15 @@ class GameControllerImpl {
       this.clearMapPreviews();
     }
     if (this.activeSheet !== 'none') {
+      this.activeToolPanel = 'none';
       this.selectedBuildingId = null;
       this.selectedTileCoords = null;
-    }
-    if (this.activeSheet === 'land') {
-      this.setTool({ mode: 'land_unlock' });
-    } else if (
-      this.activeSheet === 'none' &&
-      (this.tool.mode === 'land_unlock' || this.tool.mode === 'rect_land')
-    ) {
-      this.setTool({ mode: 'inspect_chop' });
+      if (this.tool.mode === 'terrain_brush' || this.tool.mode === 'terraform' || this.tool.mode === 'land_unlock') {
+        this.tool = { mode: 'inspect_chop' };
+        this.panMode = false;
+        this.phaserHost?.worldScene.setTool(this.tool);
+        this.phaserHost?.worldScene.setPanMode(false);
+      }
     }
     this.notifyImmediate();
   }
@@ -560,6 +630,7 @@ class GameControllerImpl {
       this.selectedBuildingId = null;
       this.selectedTileCoords = null;
       this.activeSheet = 'none';
+      this.activeToolPanel = 'none';
       this.tool = { mode: 'inspect_chop' };
       this.panMode = false;
       this.ghostInfo = null;
@@ -617,6 +688,7 @@ class GameControllerImpl {
       this.selectedBuildingId = null;
       this.selectedTileCoords = null;
       this.activeSheet = 'none';
+      this.activeToolPanel = 'none';
       this.tool = { mode: 'inspect_chop' };
       this.panMode = false;
       this.ghostInfo = null;
@@ -657,6 +729,7 @@ class GameControllerImpl {
     this.selectedBuildingId = null;
     this.selectedTileCoords = null;
     this.activeSheet = 'none';
+    this.activeToolPanel = 'none';
     this.activeModal = 'none';
     this.tool = { mode: 'inspect_chop' };
     this.panMode = false;
@@ -702,6 +775,7 @@ class GameControllerImpl {
       selectedBuildingId: this.selectedBuildingId,
       ghostInfo: this.ghostInfo,
       activeSheet: this.activeSheet,
+      activeToolPanel: this.activeToolPanel,
       activeModal: this.activeModal,
       simInspectorOpen: this.simInspectorOpen,
       toastError: this.toastError,

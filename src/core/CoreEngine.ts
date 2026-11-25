@@ -1363,7 +1363,7 @@ export class CoreEngine {
       }
 
       case 'PAINT_TERRAIN_BRUSH': {
-        const r = Math.max(0, Math.min(3, Math.floor(cmd.radius)));
+        const r = Math.max(0, Math.min(6, Math.floor(cmd.radius)));
         if (cmd.brush === 'unlock') {
           let unlockedAny = 0;
           const ownerCity = this.state.activeCityId || 1;

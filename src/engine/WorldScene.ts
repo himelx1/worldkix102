@@ -238,6 +238,7 @@ export class WorldScene extends Phaser.Scene {
     }
     this.forceEntitySync = true;
     this.renderPreviews();
+    this.renderMapOverlay();
   }
 
   public rotateGhostTool(): 0 | 1 {
@@ -1647,7 +1648,10 @@ export class WorldScene extends Phaser.Scene {
 
     const inLandMode = this.isInLandMode();
     const showZoneLayer =
-      this.overlayMode === 'zones' || Boolean(this.engine.state.showZoneBorders) || inLandMode;
+      this.overlayMode === 'zones' ||
+      Boolean(this.engine.state.showZoneBorders) ||
+      inLandMode ||
+      (this.tool.mode === 'terrain_brush' && this.tool.brush === 'zone');
     const showLoggingPermits =
       inLandMode ||
       this.overlayMode === 'zones' ||

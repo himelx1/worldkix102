@@ -304,32 +304,21 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
       ) : null}
 
       {state.landModeActive || state.showZoneBorders ? (
-        <div className="mt-1 flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-sky-950/75 border border-sky-600/50 text-[11px] text-sky-100 tabular-nums">
+        <button
+          type="button"
+          onClick={() => GameController.setActiveToolPanel('view')}
+          className="mt-1 w-full flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-sky-950/75 hover:bg-sky-900/80 border border-sky-600/50 text-[11px] text-sky-100 tabular-nums transition-colors"
+        >
           <span className="flex items-center gap-1.5 truncate font-semibold">
             <MapIcon className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-            {state.landModeActive ? 'True Land Mode Active (Terrain & Tile Prices)' : 'District Zone Borders Visible'}
+            {state.landModeActive && state.showZoneBorders
+              ? 'Land View & Borders Active'
+              : state.landModeActive
+                ? 'Land View Active'
+                : 'Border Mode ON'}
           </span>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {state.showZoneBorders ? (
-              <button
-                type="button"
-                onClick={() => GameController.dispatch({ type: 'TOGGLE_ZONE_BORDERS', enabled: false })}
-                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-stone-100 font-bold text-[10px]"
-              >
-                Hide Zones
-              </button>
-            ) : null}
-            {state.landModeActive ? (
-              <button
-                type="button"
-                onClick={() => GameController.dispatch({ type: 'TOGGLE_LAND_MODE', enabled: false })}
-                className="px-2 py-0.5 rounded bg-amber-400 hover:bg-amber-300 text-stone-950 font-bold text-[10px]"
-              >
-                Exit Land Mode
-              </button>
-            ) : null}
-          </div>
-        </div>
+          <span className="text-[10px] font-bold text-amber-300 shrink-0">View Options</span>
+        </button>
       ) : null}
     </header>
   );

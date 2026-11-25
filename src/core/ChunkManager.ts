@@ -773,7 +773,7 @@ export class ChunkManager {
     brush: 'water' | 'land' | 'zone' | 'logging_permit' | 'clear_permit',
     zoneId: ZoneId = ZoneId.None
   ): { changed: number; skippedMountains: number; skippedLocked: number; skippedOccupied: number } {
-    const r = Math.max(0, Math.min(3, Math.floor(radius)));
+    const r = Math.max(0, Math.min(6, Math.floor(radius)));
     let changed = 0;
     let skippedMountains = 0;
     let skippedLocked = 0;
@@ -821,5 +821,62 @@ export class ChunkManager {
     }
 
     return { changed, skippedMountains, skippedLocked, skippedOccupied };
+  }
+
+  public getLandStatistics(): {
+    totalLandBlocks: number;
+    totalOwnedLandBlocks: number;
+    totalUnlockedLandBlocks: number;
+    totalLockedLandBlocks: number;
+    totalWaterAreaBlocks: number;
+    totalOwnedLandAreaBlocks: number;
+    totalLandValue: number;
+  } {
+    const unlockedCount = this.countUnlockedTiles();
+    let totalLandBlocks = 0;
+    let totalOwnedLandBlocks = 0;
+    let totalUnlockedInLoaded = 0;
+    let totalLockedLandBlocks = 0;
+    let totalWaterAreaBlocks = 0;
+    let totalLandValue = 0;
+
+    for (const chunk of this.chunks.values()) {
+      for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          const idx = ly * CHUNK_SIZE + lx;
+          const biome = chunk.biomeId[idx] as BiomeId;
+          const isWater = this.isWaterBiome(biome);
+          const isUnlocked = (chunk.flags[idx] & TileFlag.Unlocked) !== 0;
+
+          if (isWater) {
+            totalWaterAreaBlocks += 1;
+          } else {
+            totalLandBlocks += 1;
+            if (isUnlocked) {
+              totalOwnedLandBlocks += 1;
+            }
+          }
+
+          if (isUnlocked) {
+            totalUnlockedInLoaded += 1;
+            const gx = chunk.cx * CHUNK_SIZE + lx;
+            const gy = chunk.cy * CHUNK_SIZE + ly;
+            totalLandValue += this.computeUnlockCost(gx, gy, unlockedCount);
+          } else {
+            totalLockedLandBlocks += 1;
+          }
+        }
+      }
+    }
+
+    return {
+      totalLandBlocks,
+      totalOwnedLandBlocks,
+      totalUnlockedLandBlocks: Math.max(unlockedCount, totalUnlockedInLoaded),
+      totalLockedLandBlocks,
+      totalWaterAreaBlocks,
+      totalOwnedLandAreaBlocks: totalOwnedLandBlocks,
+      totalLandValue,
+    };
   }
 }

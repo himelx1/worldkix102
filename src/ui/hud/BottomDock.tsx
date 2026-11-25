@@ -1,33 +1,38 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Axe,
   Compass,
+  Eye,
   FlaskConical,
   Hammer,
   Landmark,
+  Layers,
   Map as MapIcon,
   Sprout,
   Users,
   Check,
   X,
   Crosshair,
-  Plus,
-  Minus,
   Trash2,
   RotateCw,
   Hand,
   Paintbrush,
-  Waves,
 } from 'lucide-react';
+import { ZONE_META, ZoneType } from '../../core/GameState';
 import { BUILDINGS, getBuildingFootprint } from '../../data/buildings.data';
+import type { TerrainBrushKind } from '../../engine/WorldScene';
 import { GameController, GameSnapshot } from '../bridge/GameController';
 
 interface BottomDockProps {
   snap: GameSnapshot;
 }
 
+const DISTRICT_ZONES = (Object.keys(ZONE_META) as ZoneType[]).filter((z) => z !== 'none');
+
 export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
-  const { tool, ghostInfo, activeSheet, activeQuest, state, panMode } = snap;
+  const { tool, ghostInfo, activeSheet, activeToolPanel, activeQuest, state, panMode } = snap;
+  const [customSizeOpen, setCustomSizeOpen] = useState(false);
+
   const isBuildGhost = tool.mode === 'build';
   const isMoveGhost = tool.mode === 'move';
   const isGhostMode = isBuildGhost || isMoveGhost;
@@ -50,61 +55,90 @@ export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
     ghostDef && ghostDef.width !== ghostDef.height && ghostDef.footprintRotatable !== false
   );
 
-  const isBrushMode =
-    tool.mode === 'terraform' ||
-    tool.mode === 'terrain_brush' ||
-    tool.mode === 'rect_land' ||
-    tool.mode === 'road' ||
-    tool.mode === 'land_unlock' ||
-    tool.mode === 'demolish' ||
-    tool.mode === 'place_utility' ||
-    tool.mode === 'remove_utility';
+  const isOtherToolBar =
+    activeToolPanel === 'none' &&
+    (tool.mode === 'road' ||
+      tool.mode === 'demolish' ||
+      tool.mode === 'place_utility' ||
+      tool.mode === 'remove_utility' ||
+      tool.mode === 'rect_land');
+
+  const isAnyBrushOrPanel = activeToolPanel !== 'none' || isOtherToolBar;
 
   const showChopHint =
     state.stats.treesCut === 0 &&
     !isGhostMode &&
-    !isBrushMode &&
+    !isAnyBrushOrPanel &&
     !snap.selectedTile &&
     !snap.selectedBuildingId;
 
+  const activeBrush = tool.mode === 'terrain_brush' ? tool.brush : 'water';
+  const activeRadius = tool.mode === 'terrain_brush' ? tool.radius : 0;
+  const activeZone: ZoneType = tool.mode === 'terrain_brush' ? (tool.zoneType ?? 'residential') : 'residential';
+  const isClearMarkingsMode =
+    activeBrush === 'clear_permit' || (activeBrush === 'zone' && activeZone === 'none');
+  const isZoneMarkingMode = activeBrush === 'zone' && activeZone !== 'none';
+  const activeDiameter = activeRadius * 2 + 1;
+
+  const setBrush = (brush: TerrainBrushKind, zoneType?: ZoneType) => {
+    GameController.updateBrushConfig({
+      brush,
+      radius: activeRadius,
+      zoneType: brush === 'zone' ? (zoneType ?? (activeZone === 'none' ? 'residential' : activeZone)) : undefined,
+    });
+  };
+
+  const setRadius = (r: number, keepCustomOpen = false) => {
+    setCustomSizeOpen(keepCustomOpen);
+    GameController.updateBrushConfig({ radius: Math.max(0, Math.min(6, Math.floor(r))) });
+  };
+
+  const applyCustomDiameter = (rawValue: number) => {
+    const clamped = Math.max(1, Math.min(13, Math.trunc(rawValue) || 1));
+    const nextRadius = Math.max(0, Math.min(6, Math.floor((clamped - 1) / 2)));
+    setRadius(nextRadius, true);
+  };
+
   return (
     <div className="pointer-events-none w-full max-w-full flex flex-col gap-2 px-2.5 pb-safe">
-      {/* Right-Edge Terraform & Recenter Controls */}
+      {/* Right-Edge Main Toolbar: strictly View | Brush | Point/Compass */}
       {!isGhostMode && (
         <div className="flex justify-end pr-0.5">
           <div className="pointer-events-auto flex flex-col gap-1.5 bg-gradient-to-b from-[#13291e]/94 to-[#08150f]/95 backdrop-blur-md border border-emerald-700/45 rounded-2xl p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_20px_rgba(0,0,0,0.4)]">
             <button
               type="button"
-              aria-label="Paint Water"
-              onClick={() => GameController.startTerraformTool('to_water')}
+              aria-label="View Settings"
+              onClick={() => GameController.setActiveToolPanel('view')}
               className={`w-11 h-11 rounded-xl border flex items-center justify-center transition-colors ${
-                tool.mode === 'terraform' && tool.action === 'to_water'
-                  ? 'bg-sky-400 border-sky-300 text-stone-950 font-bold'
-                  : 'bg-[#0a1c13] hover:bg-sky-950/80 border-sky-800/60 text-sky-300'
+                activeToolPanel === 'view'
+                  ? 'bg-emerald-400 border-emerald-300 text-stone-950 font-bold'
+                  : state.landModeActive || state.showZoneBorders
+                    ? 'bg-[#0d271b] border-amber-400/70 text-amber-300'
+                    : 'bg-[#0a1c13] hover:bg-emerald-900/80 border-emerald-800/50 text-emerald-300'
               }`}
-              title="Paint Water (75C)"
+              title="View"
             >
-              <Waves className="w-4 h-4" />
+              <Eye className="w-4 h-4" />
             </button>
             <button
               type="button"
-              aria-label="Reclaim Land"
-              onClick={() => GameController.startTerraformTool('to_land')}
+              aria-label="Brush Tools"
+              onClick={() => GameController.setActiveToolPanel('brush')}
               className={`w-11 h-11 rounded-xl border flex items-center justify-center transition-colors ${
-                tool.mode === 'terraform' && tool.action === 'to_land'
-                  ? 'bg-emerald-400 border-emerald-300 text-stone-950 font-bold'
-                  : 'bg-[#0a1c13] hover:bg-emerald-900/80 border-emerald-800/50 text-emerald-300'
+                activeToolPanel === 'brush'
+                  ? 'bg-sky-400 border-sky-300 text-stone-950 font-bold'
+                  : 'bg-[#0a1c13] hover:bg-sky-950/80 border-sky-800/60 text-sky-300'
               }`}
-              title="Reclaim Land (75C)"
+              title="Brush"
             >
-              <Sprout className="w-4 h-4" />
+              <Paintbrush className="w-4 h-4" />
             </button>
             <button
               type="button"
               aria-label="Recenter camera"
               onClick={() => GameController.centerCamera()}
               className="w-11 h-11 rounded-xl bg-[#0a1c13] hover:bg-emerald-900/80 border border-emerald-800/50 text-amber-300 flex items-center justify-center transition-colors"
-              title="Recenter Camera"
+              title="Point / Compass"
             >
               <Crosshair className="w-4 h-4" />
             </button>
@@ -120,60 +154,302 @@ export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
         </div>
       ) : null}
 
-      {/* Active Draggable Terraform Mode Banner */}
-      {tool.mode === 'terraform' ? (
-        <div className="pointer-events-auto mx-auto w-full max-w-md min-w-0 bg-gradient-to-b from-[#0f2938]/96 to-[#081722]/96 backdrop-blur-md border border-sky-500/60 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-2 shadow-lg">
-          <div className="flex items-center gap-1.5 min-w-0 flex-1">
-            <Waves className="w-4 h-4 text-sky-300 shrink-0" />
-            <div className="flex items-center gap-1 min-w-0">
+      {/* Centralized Bottom Brush Panel (Compact Floating Tool Panel) */}
+      {!isGhostMode && activeToolPanel === 'brush' ? (
+        <div className="pointer-events-auto mx-auto w-full max-w-lg min-w-0 bg-gradient-to-b from-[#0f2938]/96 to-[#081722]/96 backdrop-blur-md border border-sky-500/60 rounded-2xl p-2.5 space-y-2 shadow-lg">
+          {/* Top Bar: Mode Status + Pan/Brush Mode Switch + Done */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Paintbrush className="w-4 h-4 text-sky-300 shrink-0" />
+              <span className="text-xs font-bold text-stone-100 truncate tabular-nums">
+                {panMode
+                  ? 'Pan Mode (Drag Map)'
+                  : `${
+                      activeBrush === 'water'
+                        ? 'Water'
+                        : activeBrush === 'land'
+                          ? 'Land'
+                          : activeBrush === 'unlock'
+                            ? 'Unlock Land'
+                            : isClearMarkingsMode
+                              ? 'Clear Markings'
+                              : activeBrush === 'logging_permit'
+                                ? 'Logging'
+                                : 'Zone Marking'
+                    } · ${activeDiameter}×${activeDiameter}`}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
-                onClick={() => GameController.startTerraformTool('to_water')}
-                className={`min-h-[44px] px-2.5 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
-                  tool.action === 'to_water'
-                    ? 'bg-sky-400 text-stone-950'
-                    : 'bg-[#091c28] border border-sky-700/60 text-sky-200'
+                onClick={() => GameController.setPanMode(!panMode)}
+                className={`min-h-[38px] px-2.5 rounded-xl text-xs font-bold flex items-center gap-1 border transition-colors ${
+                  panMode
+                    ? 'bg-amber-400 border-amber-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-500/70 text-sky-100'
                 }`}
               >
-                To Water (75C)
+                {panMode ? <Hand className="w-3.5 h-3.5" /> : <Paintbrush className="w-3.5 h-3.5" />}
+                {panMode ? 'Pan' : 'Brush'}
               </button>
               <button
                 type="button"
-                onClick={() => GameController.startTerraformTool('to_land')}
-                className={`min-h-[44px] px-2.5 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
-                  tool.action === 'to_land'
-                    ? 'bg-emerald-400 text-stone-950'
-                    : 'bg-[#091c28] border border-emerald-700/60 text-emerald-200'
-                }`}
+                onClick={() => {
+                  setCustomSizeOpen(false);
+                  GameController.setActiveToolPanel('none');
+                }}
+                className="min-h-[38px] px-3 rounded-xl bg-sky-700 hover:bg-sky-600 text-white text-xs font-bold flex items-center gap-1 shrink-0"
               >
-                To Land (75C)
+                <Check className="w-3.5 h-3.5" />
+                Done
               </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          {/* Brush Options */}
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+            {(
+              [
+                { id: 'water', label: 'Water', active: activeBrush === 'water', onClick: () => setBrush('water') },
+                { id: 'land', label: 'Land', active: activeBrush === 'land', onClick: () => setBrush('land') },
+                { id: 'unlock', label: 'Unlock Land', active: activeBrush === 'unlock', onClick: () => setBrush('unlock') },
+                {
+                  id: 'zone',
+                  label: 'Zone Marking',
+                  active: isZoneMarkingMode,
+                  onClick: () => setBrush('zone', activeZone === 'none' ? 'residential' : activeZone),
+                },
+                {
+                  id: 'clear',
+                  label: 'Clear Markings',
+                  active: isClearMarkingsMode,
+                  onClick: () => setBrush('clear_permit'),
+                },
+                {
+                  id: 'logging_permit',
+                  label: 'Logging Permit',
+                  active: activeBrush === 'logging_permit',
+                  onClick: () => setBrush('logging_permit'),
+                },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={opt.onClick}
+                className={`min-h-[36px] px-2.5 rounded-xl text-[11px] font-bold whitespace-nowrap shrink-0 border transition-colors ${
+                  opt.active
+                    ? opt.id === 'land'
+                      ? 'bg-emerald-400 border-emerald-300 text-stone-950'
+                      : opt.id === 'clear'
+                        ? 'bg-rose-400 border-rose-300 text-stone-950'
+                        : 'bg-sky-400 border-sky-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-sky-100 hover:border-sky-500/70'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Contextual Sub-Option: District Zone Selector OR Clear Target */}
+          {isZoneMarkingMode ? (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-sky-200 font-semibold shrink-0">District:</span>
+              <select
+                value={activeZone}
+                onChange={(e) => setBrush('zone', e.target.value as ZoneType)}
+                className="flex-1 min-w-0 min-h-[36px] px-2.5 rounded-xl bg-[#07151f] border border-sky-700/70 text-[11px] font-semibold text-stone-100"
+              >
+                {DISTRICT_ZONES.map((z) => (
+                  <option key={z} value={z}>
+                    {ZONE_META[z].name} ({ZONE_META[z].bonusText})
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : isClearMarkingsMode ? (
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-sky-200 font-semibold shrink-0">Clear:</span>
+              <button
+                type="button"
+                onClick={() => setBrush('clear_permit')}
+                className={`min-h-[32px] px-2.5 rounded-lg font-bold border ${
+                  activeBrush === 'clear_permit'
+                    ? 'bg-rose-400 border-rose-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                Logging Permits
+              </button>
+              <button
+                type="button"
+                onClick={() => setBrush('zone', 'none')}
+                className={`min-h-[32px] px-2.5 rounded-lg font-bold border ${
+                  activeBrush === 'zone' && activeZone === 'none'
+                    ? 'bg-rose-400 border-rose-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                District Zones
+              </button>
+            </div>
+          ) : null}
+
+          {/* Brush Size Controls: Small, Medium, Large, Custom Size */}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5 border-t border-sky-800/50 tabular-nums">
+            <div className="flex items-center gap-1">
+              <span className="text-[11px] text-sky-200/90 font-semibold mr-0.5">Size:</span>
+              <button
+                type="button"
+                onClick={() => setRadius(0, false)}
+                className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-bold border ${
+                  !customSizeOpen && activeRadius === 0
+                    ? 'bg-amber-400 border-amber-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                Small
+              </button>
+              <button
+                type="button"
+                onClick={() => setRadius(1, false)}
+                className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-bold border ${
+                  !customSizeOpen && activeRadius === 1
+                    ? 'bg-amber-400 border-amber-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                Medium
+              </button>
+              <button
+                type="button"
+                onClick={() => setRadius(2, false)}
+                className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-bold border ${
+                  !customSizeOpen && activeRadius === 2
+                    ? 'bg-amber-400 border-amber-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                Large
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextOpen = !customSizeOpen;
+                  setCustomSizeOpen(nextOpen);
+                  if (nextOpen && activeRadius < 3) {
+                    setRadius(3, true);
+                  }
+                }}
+                className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-bold border ${
+                  customSizeOpen || activeRadius >= 3
+                    ? 'bg-amber-400 border-amber-300 text-stone-950'
+                    : 'bg-[#091c28] border-sky-800/70 text-stone-200'
+                }`}
+              >
+                Custom
+              </button>
+            </div>
+
+            {(customSizeOpen || activeRadius >= 3) && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  aria-label="Decrease custom brush size"
+                  onClick={() => setRadius(Math.max(0, activeRadius - 1), true)}
+                  className="w-8 h-[34px] rounded-lg bg-[#091c28] border border-sky-700/70 text-stone-100 font-bold text-xs"
+                >
+                  -
+                </button>
+                <input
+                  type="number"
+                  aria-label="Custom brush width"
+                  min={1}
+                  max={13}
+                  step={2}
+                  value={activeDiameter}
+                  onChange={(e) => applyCustomDiameter(Number(e.target.value))}
+                  className="w-12 h-[34px] text-center rounded-lg bg-[#07151f] border border-sky-700/70 text-xs font-bold text-amber-300"
+                />
+                <button
+                  type="button"
+                  aria-label="Increase custom brush size"
+                  onClick={() => setRadius(Math.min(6, activeRadius + 1), true)}
+                  className="w-8 h-[34px] rounded-lg bg-[#091c28] border border-sky-700/70 text-stone-100 font-bold text-xs"
+                >
+                  +
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : !isGhostMode && activeToolPanel === 'view' ? (
+        /* Centralized Bottom View Panel */
+        <div className="pointer-events-auto mx-auto w-full max-w-lg min-w-0 bg-gradient-to-b from-[#13291e]/96 to-[#08150f]/96 backdrop-blur-md border border-emerald-600/60 rounded-2xl p-2.5 space-y-2 shadow-lg">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Eye className="w-4 h-4 text-emerald-300 shrink-0" />
+              <span className="text-xs font-bold text-stone-100 truncate">
+                View Mode: {state.landModeActive ? 'Land View' : 'Normal View'}
+                {state.showZoneBorders ? ' · Borders ON' : ''}
+              </span>
+            </div>
             <button
               type="button"
-              onClick={() => GameController.setPanMode(!panMode)}
-              className={`min-h-[44px] px-2.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
-                panMode
-                  ? 'bg-amber-400 text-stone-950'
-                  : 'bg-[#091c28] border border-sky-600/60 text-stone-100'
-              }`}
+              onClick={() => GameController.setActiveToolPanel('none')}
+              className="min-h-[38px] px-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 shrink-0"
             >
-              {panMode ? <Hand className="w-3.5 h-3.5" /> : <Paintbrush className="w-3.5 h-3.5" />}
-              {panMode ? 'Pan' : 'Paint'}
-            </button>
-            <button
-              type="button"
-              onClick={() => GameController.setTool({ mode: 'inspect_chop' })}
-              className="min-h-[44px] px-3 rounded-xl bg-sky-700 hover:bg-sky-600 text-white text-xs font-bold shrink-0"
-            >
+              <Check className="w-3.5 h-3.5" />
               Done
             </button>
           </div>
+
+          <div className="grid grid-cols-3 gap-1.5">
+            <button
+              type="button"
+              onClick={() => GameController.dispatch({ type: 'TOGGLE_LAND_MODE', enabled: false })}
+              className={`min-h-[42px] px-2 rounded-xl border text-xs font-bold transition-colors ${
+                !state.landModeActive
+                  ? 'bg-emerald-400 border-emerald-300 text-stone-950'
+                  : 'bg-[#091c12] border-emerald-800/70 text-stone-200'
+              }`}
+            >
+              Normal View
+            </button>
+            <button
+              type="button"
+              onClick={() => GameController.dispatch({ type: 'TOGGLE_LAND_MODE', enabled: true })}
+              className={`min-h-[42px] px-2 rounded-xl border text-xs font-bold transition-colors ${
+                state.landModeActive
+                  ? 'bg-amber-400 border-amber-300 text-stone-950'
+                  : 'bg-[#091c12] border-emerald-800/70 text-stone-200'
+              }`}
+            >
+              Land View
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                GameController.dispatch({
+                  type: 'TOGGLE_ZONE_BORDERS',
+                  enabled: !state.showZoneBorders,
+                })
+              }
+              className={`min-h-[42px] px-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1 transition-colors ${
+                state.showZoneBorders
+                  ? 'bg-sky-400 border-sky-300 text-stone-950'
+                  : 'bg-[#091c12] border-emerald-800/70 text-stone-200'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Borders {state.showZoneBorders ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
         </div>
-      ) : isBrushMode ? (
+      ) : !isGhostMode && isOtherToolBar ? (
+        /* Existing Road / Demolish / Utility Active Bar */
         <div
           className={`pointer-events-auto mx-auto w-full max-w-md min-w-0 backdrop-blur-md border rounded-2xl px-3 py-2 flex items-center justify-between gap-2 shadow-lg ${
             tool.mode === 'demolish' || tool.mode === 'remove_utility'
@@ -194,15 +470,9 @@ export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
                   ? 'Remove: Tap/drag roads, trees & buildings'
                   : tool.mode === 'road'
                     ? 'Road Brush: Tap or drag along tiles'
-                    : tool.mode === 'land_unlock'
-                      ? 'Expand: Tap or drag border tiles'
-                      : tool.mode === 'rect_land'
-                        ? 'Rect Land Tool: Use Land sheet to preview & buy'
-                        : tool.mode === 'terrain_brush'
-                          ? `Terrain Brush (${tool.brush.replace('_', ' ')} · ${tool.radius * 2 + 1}×${tool.radius * 2 + 1}): Tap/drag`
-                          : tool.mode === 'place_utility'
-                            ? 'Utility Brush: Tap or drag tiles'
-                            : 'Remove Utility: Tap or drag tiles'}
+                    : tool.mode === 'place_utility'
+                      ? 'Utility Brush: Tap or drag tiles'
+                      : 'Remove Utility: Tap or drag tiles'}
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -373,13 +643,7 @@ export const BottomDock: React.FC<BottomDockProps> = ({ snap }) => {
         <DockTab
           icon={<MapIcon className="w-5 h-5" />}
           label="Land"
-          active={
-            activeSheet === 'land' ||
-            tool.mode === 'land_unlock' ||
-            tool.mode === 'rect_land' ||
-            tool.mode === 'terrain_brush' ||
-            Boolean(state.landModeActive)
-          }
+          active={activeSheet === 'land'}
           onClick={() => GameController.setActiveSheet('land')}
         />
         <DockTab

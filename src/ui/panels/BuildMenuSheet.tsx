@@ -14,7 +14,6 @@ import {
   Mountain,
   Trees,
   Truck,
-  Waves,
   Zap,
 } from 'lucide-react';
 import { formatInGameHourlyRate, getRecipeHourlyAmount } from '../../core/Formatters';
@@ -257,41 +256,6 @@ export const BuildMenuSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
           </button>
         ))}
       </div>
-
-      {/* Draggable Land <-> Water Terraforming Card */}
-      {(tab === 'energy' || tab === 'all') && !q && (
-        <div className="mb-4 p-3 rounded-2xl bg-gradient-to-b from-[#0d2433] to-[#081722] border border-sky-700/55 space-y-2.5 min-w-0">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <Waves className="w-4 h-4 text-sky-300 shrink-0" />
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-stone-100 truncate">
-                  Terrain Sculptor (Land ↔ Water)
-                </div>
-                <div className="text-[11px] text-sky-200/80">
-                  Drag across unlocked tiles to carve canals or reclaim water (75C/tile).
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => GameController.startTerraformTool('to_water')}
-              className="min-h-[44px] px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs"
-            >
-              Paint Water (75C)
-            </button>
-            <button
-              type="button"
-              onClick={() => GameController.startTerraformTool('to_land')}
-              className="min-h-[44px] px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
-            >
-              Reclaim Land (75C)
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Road Painting & Road Grid Builder */}
       {(tab === 'roads' || tab === 'all') && (
