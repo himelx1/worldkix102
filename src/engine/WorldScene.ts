@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
-import { RoadType } from '../data/roads.data';
-import { DepositType, FeatureType } from '../data/trees.data';
+import { getRoadProperties, RoadType } from '../data/roads.data';
+import { DepositType, FeatureType, isTreeFeature } from '../data/trees.data';
 import type { CoreEngine } from '../core/CoreEngine';
 import {
   BiomeId,
@@ -9,6 +9,7 @@ import {
   ChunkData,
   RoadDirection,
   TileFlag,
+  TreeStage,
   UtilityFlag,
   ZoneId,
   ZONE_ID_TO_TYPE,
@@ -24,13 +25,26 @@ import {
   isoToGridApprox,
 } from '../core/IsoMath';
 import type { PerfMonitor } from '../persistence/PerfMonitor';
-import type { UtilityPlacementKind } from '../systems/UtilityNetworkSystem';
+import { UtilityNetworkSystem, type UtilityPlacementKind } from '../systems/UtilityNetworkSystem';
 import { ATLAS_KEY, generateWorldAtlas, getBuildingSpriteRef, isHalfResBuildingFrame } from './AtlasGenerator';
 import type { AudioSystem } from './AudioSystem';
 import { CameraInputController } from './CameraInputController';
 import { VfxPool } from './VfxPool';
 
-export type OverlayMode = 'none' | 'power' | 'water' | 'zones' | 'deposits' | 'paths' | 'traffic';
+export type OverlayMode =
+  | 'none'
+  | 'power'
+  | 'water'
+  | 'zones'
+  | 'deposits'
+  | 'paths'
+  | 'traffic'
+  /** Layer 1: road connectivity + junction registry + connectors */
+  | 'road_network'
+  /** Layer 2: lane/signal/queue diagnostics */
+  | 'traffic_diagnostics'
+  /** Forestry work zones + tree maturity + fleet state */
+  | 'forestry';
 
 export type TerrainBrushKind = 'water' | 'land' | 'unlock' | 'zone' | 'logging_permit' | 'clear_permit';
 
@@ -1717,6 +1731,15 @@ export class WorldScene extends Phaser.Scene {
       }
     }
 
+    if (
+      this.overlayMode === 'road_network' ||
+      this.overlayMode === 'traffic_diagnostics' ||
+      this.overlayMode === 'forestry'
+    ) {
+      this.renderDiagnosticOverlay(bounds);
+      return;
+    }
+
     if (this.overlayMode === 'none' && !showZoneLayer && !showLoggingPermits) return;
     const DEP_COLORS: Record<number, number> = {
       [DepositType.Stone]: 0x94a3b8,
@@ -1733,8 +1756,10 @@ export class WorldScene extends Phaser.Scene {
       const isPower = this.overlayMode === 'power';
       const lineFlag = isPower ? UtilityFlag.PowerLine : UtilityFlag.WaterPipe;
       const hubFlag = isPower ? UtilityFlag.PowerSubstation : UtilityFlag.WaterPump;
-      const netColor = isPower ? 0xfacc15 : 0x38bdf8;
       const hubColor = isPower ? 0xfef08a : 0xbae6fd;
+      // Real per-tile network data (layer 3). Never infer supply from totals and
+      // never colour a tile as live just because another tile is nearby.
+      const netMap = UtilityNetworkSystem.buildTileNetworkMap(this.engine.state, this.engine.chunks, isPower ? 'power' : 'water');
 
       for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
         for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
@@ -1747,16 +1772,24 @@ export class WorldScene extends Phaser.Scene {
           const cx = sx;
           const cy = sy + 16;
 
-          gfx.lineStyle(2.2, netColor, 0.9);
+          const info = netMap.get(`${gx}:${gy}`);
+          // Unsupplied sections are red; supplied ones use the utility colour.
+          const netColor = !info ? 0x64748b : info.energized ? (isPower ? 0xfacc15 : 0x38bdf8) : 0xef4444;
+
+          // Draw only links that exist in the real network (same network id).
+          gfx.lineStyle(2.2, netColor, info?.energized ? 0.95 : 0.75);
           for (const [dx, dy] of [
             [1, 0],
             [0, 1],
           ] as const) {
+            const nbKey = `${gx + dx}:${gy + dy}`;
+            const nbInfo = netMap.get(nbKey);
+            if (!nbInfo) continue;
+            if (info && nbInfo.networkId !== info.networkId) continue;
             const nb = this.engine.chunks.getTile(gx + dx, gy + dy);
-            if ((nb.chunk.utilityNet[nb.index] & (lineFlag | hubFlag)) !== 0) {
-              const nbIso = gridToIso(gx + dx, gy + dy, nb.chunk.elevation[nb.index]);
-              gfx.lineBetween(cx, cy, nbIso.sx, nbIso.sy + 16);
-            }
+            if ((nb.chunk.utilityNet[nb.index] & (lineFlag | hubFlag)) === 0) continue;
+            const nbIso = gridToIso(gx + dx, gy + dy, nb.chunk.elevation[nb.index]);
+            gfx.lineBetween(cx, cy, nbIso.sx, nbIso.sy + 16);
           }
 
           if ((u & hubFlag) !== 0) {
@@ -2008,6 +2041,225 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Diagnostic overlays. Every marker is derived from live simulation data:
+   *  - road_network: layer-1 graph (logical connections, junctions, connectors)
+   *  - traffic_diagnostics: layer-2 state (signals, queues, congestion)
+   *  - forestry: tree lifecycle stages, work zones and truck destinations
+   */
+  private renderDiagnosticOverlay(bounds: {
+    minGx: number;
+    maxGx: number;
+    minGy: number;
+    maxGy: number;
+  }): void {
+    const gfx = this.overlayGraphics;
+    if (!gfx) return;
+    const roadNet = this.engine.roadNet;
+    const chunks = this.engine.chunks;
+
+    // ---- Layer 1: road connectivity --------------------------------------
+    if (this.overlayMode === 'road_network') {
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = chunks.getTile(gx, gy);
+          const rt = chunk.roadType[index] as RoadType;
+          if (rt === RoadType.None) continue;
+          if (rt === RoadType.Rail) continue;
+
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+          const node = roadNet.getGraphNode(gx, gy);
+          const linked = (node?.neighbours.length ?? 0) > 0;
+          const cluster = roadNet.getRoadClusterId(gx, gy);
+          const info = roadNet.getClusterInfo(cluster);
+          const isolated = !linked;
+
+          // Draw the exact logical edges (never a visual-only adjacency).
+          if (node) {
+            gfx.lineStyle(isolated ? 2.4 : 1.6, isolated ? 0xef4444 : 0x22d3ee, isolated ? 0.95 : 0.6);
+            for (const nk of node.neighbours) {
+              const [nx, ny] = nk.split(':').map(Number);
+              if (nx < bounds.minGx || nx > bounds.maxGx || ny < bounds.minGy || ny > bounds.maxGy) continue;
+              const nb = chunks.getTile(nx, ny);
+              const nbIso = gridToIso(nx, ny, nb.chunk.elevation[nb.index]);
+              gfx.lineBetween(sx, sy + 16, nbIso.sx, nbIso.sy + 16);
+            }
+          }
+
+          const fill = isolated ? 0xef4444 : info?.isMainNetwork ? 0x22c55e : 0x38bdf8;
+          gfx.fillStyle(fill, isolated ? 0.4 : 0.18);
+          gfx.beginPath();
+          gfx.moveTo(sx, sy + 2);
+          gfx.lineTo(sx + 26, sy + 16);
+          gfx.lineTo(sx, sy + 30);
+          gfx.lineTo(sx - 26, sy + 16);
+          gfx.closePath();
+          gfx.fillPath();
+
+          // Junction markers + signal phase.
+          const junction = roadNet.getJunction(gx, gy);
+          if (junction) {
+            gfx.lineStyle(2, junction.signalized ? 0xfacc15 : 0x818cf8, 0.95);
+            gfx.strokeCircle(sx, sy + 16, 9);
+            if (junction.signalized) {
+              const ns = roadNet.getSignalState(gx, gy, 0, 1, this.animClockSec);
+              const ew = roadNet.getSignalState(gx, gy, 1, 0, this.animClockSec);
+              const col = (s2: string) => (s2 === 'green' ? 0x22c55e : s2 === 'yellow' ? 0xfacc15 : 0xef4444);
+              gfx.fillStyle(col(ns), 1);
+              gfx.fillCircle(sx - 4, sy + 16, 2.6);
+              gfx.fillStyle(col(ew), 1);
+              gfx.fillCircle(sx + 4, sy + 16, 2.6);
+            }
+          }
+
+          if (rt === RoadType.Connector) {
+            const status = roadNet.evaluateConnectorStatus(gx, gy, chunks);
+            gfx.lineStyle(2.4, status.connected ? 0x22c55e : 0xf59e0b, 1);
+            gfx.strokeEllipse(sx, sy + 16, 26, 14);
+          }
+        }
+      }
+
+      // Buildings with broken access are highlighted in red.
+      for (const b of this.engine.state.buildings) {
+        const def = BUILDINGS[b.defId];
+        if (!def) continue;
+        const fp = getBuildingFootprint(def, b.rotation ?? 0);
+        if (b.gx + fp.width < bounds.minGx || b.gx > bounds.maxGx) continue;
+        if (b.gy + fp.height < bounds.minGy || b.gy > bounds.maxGy) continue;
+        const access = roadNet.getCachedRoadAccess(b, chunks);
+        const needsRoad = def.requiresRoad;
+        const ok = access.accessPoints.length > 0;
+        const outline = ok ? (access.heavyTruckSuitable ? 0x22c55e : 0xf59e0b) : needsRoad ? 0xef4444 : 0x94a3b8;
+        this.strokeFootprint(gfx, b.gx, b.gy, fp.width, fp.height, outline, ok ? 1.4 : 2.2);
+      }
+      return;
+    }
+
+    // ---- Layer 2: traffic diagnostics ------------------------------------
+    if (this.overlayMode === 'traffic_diagnostics') {
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = chunks.getTile(gx, gy);
+          const rt = chunk.roadType[index] as RoadType;
+          if (rt === RoadType.None || rt === RoadType.Rail) continue;
+          const props = getRoadProperties(rt);
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+          const cong = roadNet.getTileCongestion(gx, gy);
+          const col = cong >= 0.6 ? 0xef4444 : cong >= 0.25 ? 0xf59e0b : 0x22c55e;
+          gfx.fillStyle(col, 0.2 + cong * 0.3);
+          gfx.beginPath();
+          gfx.moveTo(sx, sy + 2);
+          gfx.lineTo(sx + 28, sy + 16);
+          gfx.lineTo(sx, sy + 30);
+          gfx.lineTo(sx - 28, sy + 16);
+          gfx.closePath();
+          gfx.fillPath();
+
+          // Lane ticks: one per lane per direction (shows real lane geometry).
+          if (props.totalLanes > 2) {
+            gfx.lineStyle(1, 0xe2e8f0, 0.55);
+            for (let l = 1; l < props.lanesPerDirection; l++) {
+              const off = (l / props.lanesPerDirection) * 8;
+              gfx.lineBetween(sx - 14, sy + 16 - off, sx + 14, sy + 16 + off);
+            }
+          }
+        }
+      }
+
+      // Live vehicles: colour by state so queues and blocks are obvious.
+      for (const rv of this.engine.logistics.roadVehicles) {
+        const { sx, sy } = gridToIso(rv.gx, rv.gy, this.getTileElev(Math.round(rv.gx), Math.round(rv.gy)));
+        const col =
+          rv.state === 'waiting_signal'
+            ? 0xef4444
+            : rv.state === 'waiting_traffic'
+              ? 0xf59e0b
+              : rv.vehicleClass === 'heavy_truck'
+                ? 0xa3e635
+                : 0x38bdf8;
+        gfx.fillStyle(col, 0.95);
+        gfx.fillCircle(sx, sy + 16, 3.4);
+      }
+      for (const lt of this.engine.logistics.loggingTrucks) {
+        const { sx, sy } = gridToIso(lt.gx, lt.gy, this.getTileElev(Math.round(lt.gx), Math.round(lt.gy)));
+        gfx.fillStyle(lt.state === 'blocked' ? 0xef4444 : 0x84cc16, 0.95);
+        gfx.fillRect(sx - 3, sy + 13, 6, 6);
+      }
+      return;
+    }
+
+    // ---- Forestry: growth stages, zones and fleet ------------------------
+    for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+      for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+        const { chunk, index } = chunks.getTile(gx, gy);
+        const ft = chunk.featureType[index] as FeatureType;
+        const elev = chunk.elevation[index];
+        const { sx, sy } = gridToIso(gx, gy, elev);
+        const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
+
+        if (ft === FeatureType.None) continue;
+        const stage = (chunk.featureStage?.[index] ?? TreeStage.Mature) as TreeStage;
+        if (stage === TreeStage.Empty) continue;
+        const col =
+          stage === TreeStage.Sapling ? 0x86efac : stage === TreeStage.Young ? 0xfde047 : 0x22c55e;
+        if (!isTreeFeature(ft)) continue;
+        gfx.fillStyle(col, unlocked ? 0.5 : 0.26);
+        gfx.lineStyle(1.2, col, 0.9);
+        gfx.fillCircle(sx, sy + 10, stage === TreeStage.Mature ? 5.5 : stage === TreeStage.Young ? 4 : 2.6);
+        gfx.strokeCircle(sx, sy + 10, stage === TreeStage.Mature ? 7 : 5);
+      }
+    }
+
+    // Persisted work zones.
+    for (const zone of this.engine.state.forestryWorkZones ?? []) {
+      if (zone.gx < bounds.minGx - 10 || zone.gx > bounds.maxGx + 10) continue;
+      if (zone.gy < bounds.minGy - 10 || zone.gy > bounds.maxGy + 10) continue;
+      const { sx, sy } = gridToIso(zone.gx, zone.gy, this.getTileElev(zone.gx, zone.gy));
+      const available = zone.matureTrees > 0 && zone.cooldownUntilTick <= this.engine.state.tick;
+      gfx.lineStyle(2, available ? 0x22c55e : 0x64748b, 0.85);
+      gfx.strokeCircle(sx, sy + 16, 22);
+      gfx.fillStyle(available ? 0x22c55e : 0x64748b, 0.14);
+      gfx.fillCircle(sx, sy + 16, 22);
+    }
+
+    // Truck destinations.
+    for (const lt of this.engine.logistics.loggingTrucks) {
+      if (lt.state !== 'to_forest' || lt.stopRoadGx === undefined || lt.stopRoadGy === undefined) continue;
+      const from = gridToIso(lt.gx, lt.gy, this.getTileElev(Math.round(lt.gx), Math.round(lt.gy)));
+      const to = gridToIso(lt.stopRoadGx, lt.stopRoadGy, this.getTileElev(lt.stopRoadGx, lt.stopRoadGy));
+      gfx.lineStyle(2, 0xa3e635, 0.75);
+      gfx.lineBetween(from.sx, from.sy + 16, to.sx, to.sy + 16);
+      gfx.strokeCircle(to.sx, to.sy + 16, 8);
+    }
+  }
+
+  private strokeFootprint(
+    gfx: Phaser.GameObjects.Graphics,
+    gx: number,
+    gy: number,
+    width: number,
+    height: number,
+    color: number,
+    lineWidth: number
+  ): void {
+    const elev = this.getTileElev(gx, gy);
+    const top = gridToIso(gx, gy, elev);
+    const right = gridToIso(gx + width, gy, elev);
+    const bottom = gridToIso(gx + width, gy + height, elev);
+    const left = gridToIso(gx, gy + height, elev);
+    gfx.lineStyle(lineWidth, color, 0.92);
+    gfx.beginPath();
+    gfx.moveTo(top.sx, top.sy);
+    gfx.lineTo(right.sx, right.sy);
+    gfx.lineTo(bottom.sx, bottom.sy);
+    gfx.lineTo(left.sx, left.sy);
+    gfx.closePath();
+    gfx.strokePath();
+  }
+
   private syncCitizens(): void {
     if (this.isInLandMode()) {
       for (let i = 0; i < this.citizenSprites.length; i++) {
@@ -2134,49 +2386,50 @@ export class WorldScene extends Phaser.Scene {
           .setVisible(true);
       }
 
-      // Render disembarked forestry worker while truck waits on the road
-      if (
-        lt.state === 'worker_chopping' &&
-        lt.workerGx !== undefined &&
-        lt.workerGy !== undefined &&
-        fwIdx < this.forestryWorkerSprites.length
-      ) {
-        const wGx = Math.round(lt.workerGx);
-        const wGy = Math.round(lt.workerGy);
-        const { chunk, index } = this.engine.chunks.getTile(wGx, wGy);
-        const wElev = chunk.elevation[index];
-        const { sx, sy } = gridToIso(lt.workerGx, lt.workerGy, wElev);
-        const stride = Math.floor(this.animClockSec * 6 + lt.id) % 2;
-        const isChopping = lt.workerPhase === 'chopping';
-        const wFrame =
-          isChopping && Math.sin(this.animClockSec * 9 + lt.id) > 0
-            ? 'cit_laborer_chop'
-            : atlasTex?.has(`cit_forester_${stride}`)
-              ? `cit_forester_${stride}`
-              : `cit_laborer_${stride}`;
-        const bob = isChopping ? 0 : Math.abs(Math.sin(this.animClockSec * 6 + lt.id)) * 1.1;
-        const wDepth = (wGx + wGy) * 100 + wElev * 2 + 28;
-        const facing = lt.workerFacing ?? 1;
+      // Render the disembarked forestry crew (5-6 workers) while the truck waits.
+      if (lt.state === 'crew_working') {
+        for (const member of lt.crew ?? []) {
+          if (member.phase === 'in_truck') continue;
+          if (fwIdx >= this.forestryWorkerSprites.length) break;
+          const wGx = Math.round(member.gx);
+          const wGy = Math.round(member.gy);
+          const { chunk, index } = this.engine.chunks.getTile(wGx, wGy);
+          const wElev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(member.gx, member.gy, wElev);
+          const stride = Math.floor(this.animClockSec * 6 + member.id) % 2;
+          const isChopping = member.phase === 'chopping';
+          const wFrame =
+            isChopping && Math.sin(this.animClockSec * 9 + member.id) > 0
+              ? 'cit_laborer_chop'
+              : atlasTex?.has(`cit_forester_${stride}`)
+                ? `cit_forester_${stride}`
+                : `cit_laborer_${stride}`;
+          const bob = isChopping ? 0 : Math.abs(Math.sin(this.animClockSec * 6 + member.id)) * 1.1;
+          const wDepth = (wGx + wGy) * 100 + wElev * 2 + 28;
+          const facing = member.facing ?? 1;
 
-        this.forestryWorkerSprites[fwIdx]
-          .setFrame(wFrame)
-          .setPosition(sx, sy + 18 - bob)
-          .setFlipX(facing < 0)
-          .setScale(0.34)
-          .setDepth(wDepth)
-          .setVisible(true);
-
-        if (lt.workerPhase === 'returning_to_truck' && lt.cargoTimber > 0) {
-          this.forestryCargoSprites[fwIdx]
-            .setFrame('cargo_wood')
-            .setPosition(sx + facing * 2.5, sy + 12.5 - bob)
-            .setScale(0.38)
-            .setDepth(wDepth + 1)
+          this.forestryWorkerSprites[fwIdx]
+            .setFrame(wFrame)
+            .setPosition(sx, sy + 18 - bob)
+            .setFlipX(facing < 0)
+            // Same 28×38 sprite family as pedestrians: keep the scale identical so
+            // forestry crew and citizens stay proportionally correct.
+            .setScale(0.34)
+            .setDepth(wDepth)
             .setVisible(true);
-        } else {
-          this.forestryCargoSprites[fwIdx].setVisible(false);
+
+          if (member.phase === 'carrying' && member.carryingLogs > 0) {
+            this.forestryCargoSprites[fwIdx]
+              .setFrame('cargo_wood')
+              .setPosition(sx + facing * 2.5, sy + 12.5 - bob)
+              .setScale(0.38)
+              .setDepth(wDepth + 1)
+              .setVisible(true);
+          } else {
+            this.forestryCargoSprites[fwIdx].setVisible(false);
+          }
+          fwIdx++;
         }
-        fwIdx++;
       }
     }
 

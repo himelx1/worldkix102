@@ -1,5 +1,6 @@
 import type { CoreEngine } from '../core/CoreEngine';
-import { ChunkData, SCHEMA_VERSION, TileFlag, WorldEngineState } from '../core/GameState';
+import { ChunkData, SCHEMA_VERSION, TileFlag, TreeStage, WorldEngineState } from '../core/GameState';
+import { FeatureType, isTreeFeature } from '../data/trees.data';
 import { CHUNK_SIZE, chunkKey } from '../core/IsoMath';
 import {
   IndexedDBStore,
@@ -52,6 +53,11 @@ export const CHUNK_V3_ROAD_BYTES =
   CHUNK_V2_BYTES +
   256; // roadDir (u8) === 5632 bytes
 
+/** v4 adds the tree lifecycle stage layer so regrowth timers survive save/load. */
+export const CHUNK_V4_STAGE_BYTES =
+  CHUNK_V3_ROAD_BYTES +
+  256; // featureStage (u8) === 5888 bytes
+
 export function computeCRC32(str: string): number {
   let c = 0xffffffff;
   for (let i = 0; i < str.length; i++) {
@@ -64,7 +70,7 @@ export function computeCRC32(str: string): number {
 }
 
 export function serializeChunk(c: ChunkData): ArrayBuffer {
-  const buf = new ArrayBuffer(CHUNK_V3_ROAD_BYTES);
+  const buf = new ArrayBuffer(CHUNK_V4_STAGE_BYTES);
   const u8 = new Uint8Array(buf);
   let off = 0;
   const copyU8 = (arr: Uint8Array) => {
@@ -91,6 +97,7 @@ export function serializeChunk(c: ChunkData): ArrayBuffer {
   copyView(c.cityRef);
   copyU8(c.zoneType);
   copyU8(c.roadDir ?? new Uint8Array(CHUNK_SIZE * CHUNK_SIZE));
+  copyU8(c.featureStage ?? new Uint8Array(CHUNK_SIZE * CHUNK_SIZE));
   return buf;
 }
 
@@ -156,6 +163,7 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
   let cityRef: Uint16Array;
   let zoneType: Uint8Array;
   let roadDir: Uint8Array;
+  let featureStage: Uint8Array;
 
   if (bytes.byteLength >= CHUNK_V2_BYTES) {
     utilityNet = takeU8();
@@ -179,6 +187,18 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
     roadDir = new Uint8Array(len);
   }
 
+  if (bytes.byteLength >= CHUNK_V4_STAGE_BYTES) {
+    featureStage = takeU8();
+  } else {
+    // Legacy chunk upgrade: derive stages from existing feature types so trees
+    // already growing in old saves keep working through the lifecycle.
+    featureStage = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      if (featureType[i] === FeatureType.Sapling) featureStage[i] = TreeStage.Sapling;
+      else if (isTreeFeature(featureType[i] as FeatureType)) featureStage[i] = TreeStage.Mature;
+    }
+  }
+
   return {
     cx,
     cy,
@@ -200,6 +220,7 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
     cityRef,
     zoneType,
     roadDir,
+    featureStage,
   };
 }
 
@@ -418,7 +439,12 @@ export class SaveManager {
     const state = engine.state;
     const now = Date.now();
     state.lastSavedAt = now;
-    const payloadJson = JSON.stringify(state);
+    // Diagnostics are derived data. Strip them from the persisted payload so a
+    // save never carries a stale snapshot (they are rebuilt on load).
+    const payloadJson = JSON.stringify({
+      ...state,
+      networkDiagnostics: undefined,
+    } satisfies WorldEngineState);
     const checksum = computeCRC32(payloadJson);
 
     const slotRecord: StoredSlotRecord = {

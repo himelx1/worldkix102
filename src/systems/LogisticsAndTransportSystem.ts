@@ -1,6 +1,6 @@
 import { BUILDINGS, getBuildingFootprint, getBuildingLevelMultiplier } from '../data/buildings.data';
 import type { ResourceId } from '../data/resources.data';
-import { getRoadProperties, ROADS, RoadType } from '../data/roads.data';
+import { getRoadProperties, isRoadAllowedForVehicle, ROADS, RoadType } from '../data/roads.data';
 import { FeatureType, isTreeFeature, TREE_SPECIES } from '../data/trees.data';
 import type { ChunkManager } from '../core/ChunkManager';
 import {
@@ -14,6 +14,7 @@ import {
   WorldEngineState,
 } from '../core/GameState';
 import { CHUNK_SIZE, chunkToGrid, gridToChunk } from '../core/IsoMath';
+import { ForestryFleetSystem } from './ForestryFleetSystem';
 import type { ForestrySystem } from './ForestrySystem';
 import { PathfindingSystem } from './PathfindingSystem';
 import { ResourceSystem } from './ResourceSystem';
@@ -98,7 +99,11 @@ function getLaneOffsetForTile(
 }
 
 export class LogisticsAndTransportSystem {
-  public readonly loggingTrucks: LoggingTruckAgent[] = [];
+  /** Forestry trucks live in their own system; exposed here for read-only UI/traffic. */
+  public readonly forestryFleet = new ForestryFleetSystem();
+  public get loggingTrucks(): LoggingTruckAgent[] {
+    return this.forestryFleet.trucks;
+  }
   public readonly trains: TrainAgent[] = [];
   public readonly roadVehicles: RoadVehicleAgent[] = [];
 
@@ -114,7 +119,7 @@ export class LogisticsAndTransportSystem {
   private lastDayReset = -1;
 
   public reset(): void {
-    this.loggingTrucks.length = 0;
+    this.forestryFleet.reset();
     this.trains.length = 0;
     this.roadVehicles.length = 0;
     this.cachedRailTiles = [];
@@ -126,6 +131,10 @@ export class LogisticsAndTransportSystem {
     this.internalSimClockSec = 0;
     this.harvestedToday = 0;
     this.lastDayReset = -1;
+    this.cargoClaims.clear();
+    this.junctionReservations.clear();
+    this.junctionHoldTimers.clear();
+    this.edgeOccupation.clear();
   }
 
   public update(
@@ -156,12 +165,21 @@ export class LogisticsAndTransportSystem {
       if (roadNet) {
         roadNet.recomputeIfDirty(chunks, state);
       }
-      this.syncLoggingTrucks(state, chunks);
+      this.syncForestryFleets(state, chunks, roadNet);
       this.syncTrains(state);
       this.syncRoadVehicles(state, chunks, roadNet);
     }
 
-    this.stepLoggingTrucks(dtSec, state, chunks, roadNet, onEvent, forestry);
+    if (roadNet && forestry) {
+      this.forestryFleet.update(
+        dtSec,
+        state,
+        chunks,
+        roadNet,
+        forestry,
+        onEvent ? (ev) => onEvent({ gx: ev.gx, gy: ev.gy, label: ev.label, color: ev.color }) : undefined
+      );
+    }
     this.stepTrains(dtSec);
     this.stepRoadVehicles(dtSec, state, chunks, roadNet, effectiveTimeSec, onEvent);
 
@@ -179,7 +197,7 @@ export class LogisticsAndTransportSystem {
             tileWaitingCount.set(key, (tileWaitingCount.get(key) ?? 0) + 1);
           }
         }
-        for (const lt of this.loggingTrucks) {
+        for (const lt of this.forestryFleet.trucks) {
           if (!lt.onRoad) continue;
           const key = `${Math.round(lt.gx)}:${Math.round(lt.gy)}`;
           tileVehicleCount.set(key, (tileVehicleCount.get(key) ?? 0) + 1);
@@ -213,657 +231,15 @@ export class LogisticsAndTransportSystem {
     }
   }
 
-  private syncLoggingTrucks(state: WorldEngineState, chunks: ChunkManager): void {
-    const factories = state.buildings.filter((b) => {
-      const def = BUILDINGS[b.defId];
-      return def?.isAutomatedLogging && b.status !== 'constructing' && b.enabled;
-    });
-
-    const activeFactoryIds = new Set(factories.map((f) => f.id));
-    for (let i = this.loggingTrucks.length - 1; i >= 0; i--) {
-      if (!activeFactoryIds.has(this.loggingTrucks[i].factoryId)) {
-        this.loggingTrucks.splice(i, 1);
-      }
-    }
-
-    for (const factory of factories) {
-      const def = BUILDINGS[factory.defId]!;
-      const targetTrucks = def.truckCapacity ?? 10;
-      const existing = this.loggingTrucks.filter((t) => t.factoryId === factory.id);
-      const fp = getBuildingFootprint(def, factory.rotation ?? 0);
-      const cx = factory.gx + fp.width * 0.5;
-      const cy = factory.gy + fp.height * 0.5;
-
-      // Seed nearby forest logging permits once if none exist nearby so trucks start immediately
-      if (existing.length === 0) {
-        let hasPermitted = false;
-        outer: for (let dy = -10; dy <= 10; dy++) {
-          for (let dx = -10; dx <= 10; dx++) {
-            if (chunks.isLoggingPermitted(Math.round(cx) + dx, Math.round(cy) + dy)) {
-              hasPermitted = true;
-              break outer;
-            }
-          }
-        }
-        if (!hasPermitted) {
-          chunks.autoPermitForestForFactory(Math.round(cx), Math.round(cy), 10);
-        }
-      }
-
-      const entrances = PathfindingSystem.findBuildingEntrances(factory, chunks, 'vehicle');
-      const spawnPt = entrances.length > 0 ? entrances[0] : { gx: cx, gy: cy };
-      const cargoCapacity = Math.max(8, Math.round(8 * getBuildingLevelMultiplier(factory.level, def)));
-
-      while (existing.length < targetTrucks) {
-        const truck: LoggingTruckAgent = {
-          id: this.nextId++,
-          factoryId: factory.id,
-          gx: spawnPt.gx,
-          gy: spawnPt.gy,
-          targetGx: spawnPt.gx,
-          targetGy: spawnPt.gy,
-          state: 'idle_at_factory',
-          cargoTimber: 0,
-          cargoCapacity,
-          harvestTimer: 0.25 + (existing.length % 5) * 0.25,
-          facing: 1,
-          route: undefined,
-          routeIdx: 0,
-          routeVersion: 0,
-          laneOffset: 0,
-          vx: 0,
-          vy: 0,
-          onRoad: entrances.length > 0,
-          statusReason: entrances.length > 0 ? 'Ready for dispatch' : 'Blocked: Connect a road adjacent to factory',
-        };
-        this.loggingTrucks.push(truck);
-        existing.push(truck);
-      }
-      for (const t of existing) {
-        t.cargoCapacity = cargoCapacity;
-      }
-    }
-
-    state.loggingStats ??= {
-      harvestedTrees: 0,
-      factoryTimberStock: 0,
-      dailyTimberProduction: 0,
-      activeTrucks: 0,
-      permittedForestTiles: 0,
-    };
-    state.loggingStats.activeTrucks = this.loggingTrucks.length;
-    state.loggingStats.permittedForestTiles = chunks.countLoggingPermittedTiles();
-    state.loggingStats.factoryTimberStock = Math.round(state.resources.wood ?? 0);
-    state.loggingStats.dailyTimberProduction = this.harvestedToday;
-  }
-
-  private findReachableTreeAndRoad(
-    factory: BuildingInstance,
-    chunks: ChunkManager,
-    reservedTrees: Set<string>,
-    roadNet?: RoadNetworkSystem,
-    originRoad?: { gx: number; gy: number },
-    maxTreeDistFromOrigin = 18
-  ): {
-    tree?: { gx: number; gy: number };
-    stopRoad?: { gx: number; gy: number };
-    entrance?: { gx: number; gy: number };
-    path?: Array<{ gx: number; gy: number }>;
-    reason?: string;
-  } {
-    const def = BUILDINGS[factory.defId];
-    const fp = def ? getBuildingFootprint(def, factory.rotation ?? 0) : { width: 3, height: 3 };
-    const cx = Math.round(factory.gx + fp.width * 0.5);
-    const cy = Math.round(factory.gy + fp.height * 0.5);
-
-    const entrances = originRoad
-      ? [originRoad]
-      : PathfindingSystem.findBuildingEntrances(factory, chunks, 'vehicle');
-    if (entrances.length === 0) {
-      return { reason: 'Blocked: Connect a drivable road to the Logging Factory' };
-    }
-
-    const refX = originRoad ? originRoad.gx : cx;
-    const refY = originRoad ? originRoad.gy : cy;
-    const r = maxTreeDistFromOrigin;
-    const candidates: Array<{ gx: number; gy: number; score: number }> = [];
-
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dy * dy > r * r) continue;
-        const tx = refX + dx;
-        const ty = refY + dy;
-        const key = `${tx}:${ty}`;
-        if (reservedTrees.has(key)) continue;
-
-        const { chunk, index } = chunks.getTile(tx, ty);
-        const ft = chunk.featureType[index] as FeatureType;
-        if (!isTreeFeature(ft) || ft === FeatureType.Sapling) continue;
-
-        const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
-        const permitted = (chunk.flags[index] & TileFlag.LoggingPermit) !== 0;
-        if (!unlocked && !permitted) continue;
-
-        candidates.push({
-          gx: tx,
-          gy: ty,
-          score: Math.hypot(dx, dy) - (permitted ? 2.5 : 0),
-        });
-      }
-    }
-
-    if (candidates.length === 0) {
-      return { reason: 'Waiting for available forest trees or regrowth' };
-    }
-
-    candidates.sort((a, b) => a.score - b.score);
-    const congestionMap = roadNet?.getTileCongestionMap();
-    let sawUnconnectedCandidate = false;
-
-    for (const cand of candidates.slice(0, 18)) {
-      const roadStops: Array<{ gx: number; gy: number; dist: number }> = [];
-      for (let rdy = -5; rdy <= 5; rdy++) {
-        for (let rdx = -5; rdx <= 5; rdx++) {
-          const rx = cand.gx + rdx;
-          const ry = cand.gy + rdy;
-          if (!PathfindingSystem.isTilePassable(rx, ry, chunks, 'vehicle')) continue;
-          const d = Math.hypot(rdx, rdy);
-          if (d <= 5.2) {
-            roadStops.push({ gx: rx, gy: ry, dist: d });
-          }
-        }
-      }
-      if (roadStops.length === 0) {
-        sawUnconnectedCandidate = true;
-        continue;
-      }
-      roadStops.sort((a, b) => a.dist - b.dist);
-
-      for (const stop of roadStops.slice(0, 3)) {
-        for (const ent of entrances.slice(0, 2)) {
-          if (ent.gx === stop.gx && ent.gy === stop.gy) {
-            return {
-              tree: { gx: cand.gx, gy: cand.gy },
-              stopRoad: { gx: stop.gx, gy: stop.gy },
-              entrance: ent,
-              path: [],
-            };
-          }
-          const path = PathfindingSystem.findPath(
-            ent.gx,
-            ent.gy,
-            stop.gx,
-            stop.gy,
-            chunks,
-            'vehicle',
-            420,
-            { vehicleClass: 'heavy_truck', congestionMap }
-          );
-          if (path && path.length > 0) {
-            return {
-              tree: { gx: cand.gx, gy: cand.gy },
-              stopRoad: { gx: stop.gx, gy: stop.gy },
-              entrance: ent,
-              path,
-            };
-          }
-        }
-      }
-      sawUnconnectedCandidate = true;
-    }
-
-    return {
-      reason: sawUnconnectedCandidate
-        ? 'Blocked: Place a Road Connector to link owned roads to forest roads'
-        : 'Waiting for available forest trees or regrowth',
-    };
-  }
-
-  private findRouteBetweenBuildings(
-    fromGx: number,
-    fromGy: number,
-    destBuilding: BuildingInstance,
-    chunks: ChunkManager,
-    roadNet?: RoadNetworkSystem
-  ): Array<{ gx: number; gy: number }> | null {
-    const startX = Math.round(fromGx);
-    const startY = Math.round(fromGy);
-    if (!this.roadSet.has(`${startX}:${startY}`)) return null;
-    const destEntrances = PathfindingSystem.findBuildingEntrances(destBuilding, chunks, 'vehicle');
-    const congestionMap = roadNet?.getTileCongestionMap();
-    for (const ent of destEntrances.slice(0, 4)) {
-      if (ent.gx === startX && ent.gy === startY) return [];
-      const path = PathfindingSystem.findPath(
-        startX,
-        startY,
-        ent.gx,
-        ent.gy,
-        chunks,
-        'vehicle',
-        420,
-        { vehicleClass: 'heavy_truck', congestionMap }
-      );
-      if (path && path.length > 0) return path;
-    }
-    return null;
-  }
-
-  private scheduleRegrowthFallback(
-    gx: number,
-    gy: number,
-    ft: FeatureType,
-    state: WorldEngineState,
-    forestry?: ForestrySystem
-  ): void {
-    if (forestry) {
-      forestry.scheduleTreeRegrowth(gx, gy, ft, state);
-      return;
-    }
-    const species = TREE_SPECIES[ft];
-    if (!species || species.woodYield <= 0 || ft === FeatureType.Sapling) return;
-    state.treeRegrowthQueue ??= [];
-    const idx = state.treeRegrowthQueue.findIndex((e) => e.gx === gx && e.gy === gy);
-    const entry = {
-      gx,
-      gy,
-      species: ft,
-      saplingAtTick: state.tick + 12,
-      readyAtTick: state.tick + 48,
-    };
-    if (idx >= 0) state.treeRegrowthQueue[idx] = entry;
-    else state.treeRegrowthQueue.push(entry);
-  }
-
-  private stepLoggingTrucks(
-    dtSec: number,
-    state: WorldEngineState,
-    chunks: ChunkManager,
-    roadNet?: RoadNetworkSystem,
-    onEvent?: (ev: TransportDeliveryEvent) => void,
-    forestry?: ForestrySystem
-  ): void {
-    if (this.loggingTrucks.length === 0) return;
-
-    const sawmills = state.buildings.filter(
-      (b) => b.status !== 'constructing' && b.enabled && SAWMILL_IDS.has(b.defId)
-    );
-
-    const reservedTrees = new Set<string>();
-    for (const t of this.loggingTrucks) {
-      if (t.reservedTreeGx !== undefined && t.reservedTreeGy !== undefined) {
-        reservedTrees.add(`${t.reservedTreeGx}:${t.reservedTreeGy}`);
-      }
-    }
-
-    for (const truck of this.loggingTrucks) {
-      if (truck.state === 'chopping') {
-        truck.state = 'worker_chopping';
-        truck.workerPhase ??= 'chopping';
-        truck.workerGx ??= truck.targetGx;
-        truck.workerGy ??= truck.targetGy;
-      }
-
-      const factory = state.buildings.find((b) => b.id === truck.factoryId);
-      if (!factory || !factory.enabled) continue;
-      const def = BUILDINGS[factory.defId];
-      if (!def) continue;
-      const fp = getBuildingFootprint(def, factory.rotation ?? 0);
-      const homeGx = factory.gx + fp.width * 0.5;
-      const homeGy = factory.gy + fp.height * 0.5;
-      const cargoCapacity = truck.cargoCapacity ?? Math.max(8, Math.round(8 * getBuildingLevelMultiplier(factory.level, def)));
-      const workerRatio = Math.max(0.2, Math.min(1.2, (factory.assignedWorkers || 1) / Math.max(1, def.maxWorkers)));
-      const baseSpeed = 2.6 * (0.7 + workerRatio * 0.6);
-
-      // 1. Disembarked worker chopping loop while truck remains parked on the road
-      if (truck.state === 'worker_chopping') {
-        truck.onRoad = this.roadSet.has(`${Math.round(truck.gx)}:${Math.round(truck.gy)}`);
-        truck.vx = 0;
-        truck.vy = 0;
-        truck.workerPhase ??= 'walking_to_tree';
-        truck.workerGx ??= truck.gx;
-        truck.workerGy ??= truck.gy;
-
-        if (truck.workerPhase === 'walking_to_tree') {
-          const tx = truck.reservedTreeGx ?? truck.targetGx;
-          const ty = truck.reservedTreeGy ?? truck.targetGy;
-          const dx = tx - truck.workerGx;
-          const dy = ty - truck.workerGy;
-          const dist = Math.hypot(dx, dy);
-          if (dist > 0.14) {
-            const step = Math.min(dist, 1.9 * dtSec);
-            truck.workerGx += (dx / dist) * step;
-            truck.workerGy += (dy / dist) * step;
-            truck.workerFacing = dx - dy >= 0 ? 1 : -1;
-            truck.statusReason = 'Forestry worker walking to tree';
-            continue;
-          }
-          truck.workerGx = tx;
-          truck.workerGy = ty;
-          truck.workerPhase = 'chopping';
-          truck.harvestTimer = 1.0;
-          truck.statusReason = 'Forestry worker chopping timber';
-          continue;
-        }
-
-        if (truck.workerPhase === 'chopping') {
-          truck.harvestTimer -= dtSec;
-          if (truck.harvestTimer > 0) continue;
-
-          const treeX = Math.round(truck.reservedTreeGx ?? truck.targetGx);
-          const treeY = Math.round(truck.reservedTreeGy ?? truck.targetGy);
-          const { cx, cy, index } = gridToChunk(treeX, treeY);
-          const chunk = chunks.getOrCreateChunk(cx, cy);
-          const ft = chunk.featureType[index] as FeatureType;
-          const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
-          const permitted = (chunk.flags[index] & TileFlag.LoggingPermit) !== 0;
-
-          if (isTreeFeature(ft) && ft !== FeatureType.Sapling && (unlocked || permitted)) {
-            const species = TREE_SPECIES[ft];
-            chunk.featureType[index] = FeatureType.None;
-            chunk.featureHp[index] = 0;
-            chunks.markChunkModified(cx, cy);
-            this.scheduleRegrowthFallback(treeX, treeY, ft, state, forestry);
-
-            const lvlMult = getBuildingLevelMultiplier(factory.level, def);
-            const timber = Math.max(2, Math.round((species?.woodYield ?? 4) * lvlMult));
-            truck.cargoTimber = Math.min(cargoCapacity, truck.cargoTimber + timber);
-            state.stats.treesCut += 1;
-            state.loggingStats ??= {
-              harvestedTrees: 0,
-              factoryTimberStock: 0,
-              dailyTimberProduction: 0,
-              activeTrucks: this.loggingTrucks.length,
-              permittedForestTiles: 0,
-            };
-            state.loggingStats.harvestedTrees += 1;
-          }
-
-          reservedTrees.delete(`${treeX}:${treeY}`);
-          truck.reservedTreeGx = undefined;
-          truck.reservedTreeGy = undefined;
-          truck.workerPhase = 'returning_to_truck';
-          truck.statusReason = 'Worker loading timber into truck';
-          continue;
-        }
-
-        // returning_to_truck
-        const dx = truck.gx - truck.workerGx;
-        const dy = truck.gy - truck.workerGy;
-        const dist = Math.hypot(dx, dy);
-        if (dist > 0.14) {
-          const step = Math.min(dist, 1.75 * dtSec);
-          truck.workerGx += (dx / dist) * step;
-          truck.workerGy += (dy / dist) * step;
-          truck.workerFacing = dx - dy >= 0 ? 1 : -1;
-          continue;
-        }
-
-        truck.workerGx = truck.gx;
-        truck.workerGy = truck.gy;
-
-        // If truck still has cargo capacity, check for another adjacent tree near current road stop
-        if (truck.cargoTimber < cargoCapacity && this.roadSet.has(`${Math.round(truck.gx)}:${Math.round(truck.gy)}`)) {
-          const nearby = this.findReachableTreeAndRoad(
-            factory,
-            chunks,
-            reservedTrees,
-            roadNet,
-            { gx: Math.round(truck.gx), gy: Math.round(truck.gy) },
-            5
-          );
-          if (nearby.tree && (!nearby.path || nearby.path.length === 0)) {
-            reservedTrees.add(`${nearby.tree.gx}:${nearby.tree.gy}`);
-            truck.reservedTreeGx = nearby.tree.gx;
-            truck.reservedTreeGy = nearby.tree.gy;
-            truck.targetGx = nearby.tree.gx;
-            truck.targetGy = nearby.tree.gy;
-            truck.workerPhase = 'walking_to_tree';
-            truck.statusReason = 'Forestry worker walking to next tree';
-            continue;
-          }
-        }
-
-        // Otherwise board truck and return strictly along connected roads to factory
-        truck.workerPhase = undefined;
-        truck.workerGx = undefined;
-        truck.workerGy = undefined;
-        const backRoute = this.findRouteBetweenBuildings(truck.gx, truck.gy, factory, chunks, roadNet);
-        if (backRoute) {
-          truck.state = 'to_factory';
-          truck.targetGx = homeGx;
-          truck.targetGy = homeGy;
-          truck.route = backRoute;
-          truck.routeIdx = 0;
-          truck.routeVersion = roadNet?.networkVersion ?? 1;
-          truck.statusReason = 'Returning timber via road network';
-        } else {
-          truck.state = 'blocked';
-          truck.route = undefined;
-          truck.harvestTimer = 1.8;
-          truck.statusReason = 'Blocked: Road or Connector back to factory missing';
-        }
-        continue;
-      }
-
-      // 2. Idle or blocked at factory/road -> seek a valid road + Connector route to an unreserved tree
-      if (truck.state === 'idle_at_factory' || truck.state === 'blocked') {
-        truck.harvestTimer -= dtSec;
-        if (truck.harvestTimer > 0) continue;
-
-        // If blocked while carrying timber on a road, try resuming route back to factory first
-        if (truck.cargoTimber > 0 && this.roadSet.has(`${Math.round(truck.gx)}:${Math.round(truck.gy)}`)) {
-          const recovery = this.findRouteBetweenBuildings(truck.gx, truck.gy, factory, chunks, roadNet);
-          if (recovery) {
-            truck.state = 'to_factory';
-            truck.route = recovery;
-            truck.routeIdx = 0;
-            truck.routeVersion = roadNet?.networkVersion ?? 1;
-            truck.statusReason = 'Resumed road route to factory';
-            continue;
-          }
-        }
-
-        const plan = this.findReachableTreeAndRoad(factory, chunks, reservedTrees, roadNet);
-        if (plan.tree && plan.stopRoad && plan.entrance && plan.path) {
-          reservedTrees.add(`${plan.tree.gx}:${plan.tree.gy}`);
-          truck.reservedTreeGx = plan.tree.gx;
-          truck.reservedTreeGy = plan.tree.gy;
-          truck.stopRoadGx = plan.stopRoad.gx;
-          truck.stopRoadGy = plan.stopRoad.gy;
-          truck.targetGx = plan.stopRoad.gx;
-          truck.targetGy = plan.stopRoad.gy;
-          truck.gx = plan.entrance.gx;
-          truck.gy = plan.entrance.gy;
-          truck.onRoad = true;
-          truck.route = plan.path;
-          truck.routeIdx = 0;
-          truck.routeVersion = roadNet?.networkVersion ?? 1;
-          truck.state = 'to_forest';
-          truck.statusReason = 'Driving on roads to harvest site';
-        } else {
-          truck.state = 'blocked';
-          truck.harvestTimer = 2.0;
-          truck.statusReason = plan.reason ?? 'Blocked: No connected road route';
-        }
-        continue;
-      }
-
-      // 3. Strictly road-following driving states: to_forest, to_factory, delivering_sawmill
-      if (roadNet && truck.routeVersion !== roadNet.networkVersion) {
-        if (truck.state === 'to_forest' && truck.stopRoadGx !== undefined && truck.stopRoadGy !== undefined) {
-          const curTile = { gx: Math.round(truck.gx), gy: Math.round(truck.gy) };
-          const reroute = this.roadSet.has(`${curTile.gx}:${curTile.gy}`)
-            ? PathfindingSystem.findPath(curTile.gx, curTile.gy, truck.stopRoadGx, truck.stopRoadGy, chunks, 'vehicle', 420, {
-                vehicleClass: 'heavy_truck',
-                congestionMap: roadNet.getTileCongestionMap(),
-              })
-            : null;
-          if (reroute) {
-            truck.route = reroute;
-            truck.routeIdx = 0;
-            truck.routeVersion = roadNet.networkVersion;
-          } else {
-            if (truck.reservedTreeGx !== undefined && truck.reservedTreeGy !== undefined) {
-              reservedTrees.delete(`${truck.reservedTreeGx}:${truck.reservedTreeGy}`);
-              truck.reservedTreeGx = undefined;
-              truck.reservedTreeGy = undefined;
-            }
-            truck.route = undefined;
-            truck.state = 'blocked';
-            truck.harvestTimer = 1.6;
-            truck.statusReason = 'Blocked: Road or Connector disconnected';
-            continue;
-          }
-        } else if (truck.state === 'to_factory') {
-          const back = this.findRouteBetweenBuildings(truck.gx, truck.gy, factory, chunks, roadNet);
-          if (back) {
-            truck.route = back;
-            truck.routeIdx = 0;
-            truck.routeVersion = roadNet.networkVersion;
-          } else {
-            truck.route = undefined;
-            truck.state = 'blocked';
-            truck.harvestTimer = 1.6;
-            truck.statusReason = 'Blocked: Road back to factory disconnected';
-            continue;
-          }
-        }
-      }
-
-      if (truck.route && (truck.routeIdx ?? 0) < truck.route.length) {
-        const curGx = Math.round(truck.gx);
-        const curGy = Math.round(truck.gy);
-        const wp = truck.route[truck.routeIdx ?? 0];
-        const wpKey = `${wp.gx}:${wp.gy}`;
-        const manhattan = Math.abs(wp.gx - curGx) + Math.abs(wp.gy - curGy);
-        const validEdge =
-          this.roadSet.has(wpKey) &&
-          (manhattan === 0 ||
-            (manhattan === 1 && PathfindingSystem.isEdgeTraversable(curGx, curGy, wp.gx, wp.gy, chunks, 'vehicle')));
-
-        if (!validEdge) {
-          truck.route = undefined;
-          truck.routeIdx = 0;
-          truck.state = 'blocked';
-          truck.harvestTimer = 1.5;
-          truck.statusReason = 'Blocked: Road path severed';
-          continue;
-        }
-
-        const dx = wp.gx - truck.gx;
-        const dy = wp.gy - truck.gy;
-        const dist = Math.hypot(dx, dy);
-        truck.onRoad = this.roadSet.has(`${curGx}:${curGy}`);
-        const speed = baseSpeed * 1.25;
-        if (dist > 0.12) {
-          const step = Math.min(dist, speed * dtSec);
-          const vx = dx / dist;
-          const vy = dy / dist;
-          truck.gx += vx * step;
-          truck.gy += vy * step;
-          truck.vx = vx;
-          truck.vy = vy;
-          truck.facing = vx - vy >= 0 ? 1 : -1;
-          truck.laneOffset = truck.onRoad
-            ? getLaneOffsetForTile(Math.round(truck.gx), Math.round(truck.gy), truck.id, chunks)
-            : 0;
-          continue;
-        }
-        truck.gx = wp.gx;
-        truck.gy = wp.gy;
-        truck.routeIdx = (truck.routeIdx ?? 0) + 1;
-        if ((truck.routeIdx ?? 0) < truck.route.length) {
-          continue;
-        }
-      }
-
-      // Arrived at route destination! (Or 0-length route when already adjacent to target)
-      if (!truck.route) {
-        truck.state = 'blocked';
-        truck.harvestTimer = 1.5;
-        truck.statusReason = 'Blocked: No road route available';
-        continue;
-      }
-
-      truck.vx = 0;
-      truck.vy = 0;
-
-      if (truck.state === 'to_forest') {
-        truck.onRoad = true;
-        truck.state = 'worker_chopping';
-        truck.workerPhase = 'walking_to_tree';
-        truck.workerGx = truck.gx;
-        truck.workerGy = truck.gy;
-        truck.statusReason = 'Forestry worker walking to tree';
-        continue;
-      }
-
-      if (truck.state === 'to_factory') {
-        if (truck.cargoTimber > 0) {
-          const added = ResourceSystem.addClamped(state, 'wood', truck.cargoTimber);
-          factory.realizedOutputTotal = (factory.realizedOutputTotal ?? 0) + added;
-          this.harvestedToday += truck.cargoTimber;
-          state.loggingStats ??= {
-            harvestedTrees: 0,
-            factoryTimberStock: 0,
-            dailyTimberProduction: 0,
-            activeTrucks: this.loggingTrucks.length,
-            permittedForestTiles: 0,
-          };
-          state.loggingStats.factoryTimberStock = Math.round(state.resources.wood ?? 0);
-          state.loggingStats.dailyTimberProduction = this.harvestedToday;
-          if (added > 0 && truck.id % 3 === 0) {
-            onEvent?.({ gx: homeGx, gy: homeGy, label: `+${added} Timber`, color: '#a3e635' });
-          }
-        }
-        truck.cargoTimber = 0;
-
-        // Check if a reachable sawmill on the same road network wants a shipment
-        if (sawmills.length > 0 && truck.id % 3 === 0 && (state.resources.wood ?? 0) >= 4) {
-          const mill = sawmills[truck.id % sawmills.length];
-          const millRoute = this.findRouteBetweenBuildings(truck.gx, truck.gy, mill, chunks, roadNet);
-          if (millRoute && millRoute.length > 0) {
-            truck.cargoTimber = 4;
-            truck.state = 'delivering_sawmill';
-            truck.route = millRoute;
-            truck.routeIdx = 0;
-            truck.routeVersion = roadNet?.networkVersion ?? 1;
-            truck.onRoad = true;
-            truck.statusReason = 'Delivering timber to Sawmill';
-            continue;
-          }
-        }
-
-        truck.state = 'idle_at_factory';
-        truck.onRoad = false;
-        truck.harvestTimer = 0.5;
-        truck.route = undefined;
-        truck.statusReason = 'Unloaded timber at factory';
-        continue;
-      }
-
-      if (truck.state === 'delivering_sawmill') {
-        truck.cargoTimber = 0;
-        if (sawmills.length > 0) {
-          const mill = sawmills[truck.id % sawmills.length];
-          if (mill.status === 'active') {
-            mill.prodProgress = Math.min(0.98, mill.prodProgress + 0.12);
-          }
-        }
-        const backRoute = this.findRouteBetweenBuildings(truck.gx, truck.gy, factory, chunks, roadNet);
-        if (backRoute) {
-          truck.state = 'to_factory';
-          truck.route = backRoute;
-          truck.routeIdx = 0;
-          truck.routeVersion = roadNet?.networkVersion ?? 1;
-          truck.statusReason = 'Returning empty from Sawmill';
-        } else {
-          truck.state = 'idle_at_factory';
-          truck.route = undefined;
-          truck.harvestTimer = 1.0;
-        }
-      }
-    }
+  /**
+   * Forestry fleet responsibility moved to ForestryFleetSystem (a dedicated
+   * system that owns work-zones, scheduling and the 5-6 man harvesting crew).
+   * This system keeps traffic, general freight and trains.
+   */
+  private syncForestryFleets(state: WorldEngineState, chunks: ChunkManager, roadNet?: RoadNetworkSystem): void {
+    if (!roadNet) return;
+    this.forestryFleet.surveyWorkZones(state, chunks, roadNet);
+    this.forestryFleet.syncFleets(state, chunks, roadNet);
   }
 
   private syncTrains(state: WorldEngineState): void {
@@ -1105,12 +481,25 @@ export class LogisticsAndTransportSystem {
     }
 
     if (this.roadVehicles.length > desiredKinds.length) {
+      // Release freight claims held by the vehicles we are about to remove, so
+      // despawned trucks can never permanently reserve stock.
+      for (let i = desiredKinds.length; i < this.roadVehicles.length; i++) {
+        const gone = this.roadVehicles[i];
+        this.releaseCargoClaim(gone.sourceBuildingId, gone.cargoResource, gone.cargoAmount ?? 0);
+        const at = `${Math.round(gone.gx)}:${Math.round(gone.gy)}`;
+        this.junctionReservations.delete(at);
+        this.junctionHoldTimers.delete(at);
+      }
       this.roadVehicles.length = desiredKinds.length;
     }
 
     for (let i = 0; i < this.roadVehicles.length; i++) {
       const veh = this.roadVehicles[i];
       if (veh.kind !== desiredKinds[i]) {
+        // Retasking a vehicle releases whatever it had promised to haul.
+        this.releaseCargoClaim(veh.sourceBuildingId, veh.cargoResource, veh.cargoAmount ?? 0);
+        veh.cargoAmount = 0;
+        veh.cargoResource = undefined;
         veh.kind = desiredKinds[i];
         veh.vehicleClass = getVehicleClass(desiredKinds[i]);
         veh.maxSpeed = getBaseMaxSpeed(desiredKinds[i]);
@@ -1273,6 +662,21 @@ export class LogisticsAndTransportSystem {
     if (sources.length === 0) sources = active.length > 0 ? active : roadBuildings;
     if (dests.length === 0) dests = active.length > 0 ? active : roadBuildings;
 
+    // Prefer a source that actually holds unclaimed stock of the resource this
+    // kind of vehicle carries. Falling back to a random source is what produced
+    // "truck wanders with nothing in it" behaviour.
+    if (cargoResource) {
+      const stocked = sources.filter(
+        (b) => this.getUnclaimedAmount(b.id, cargoResource as ResourceId, state) > 0
+      );
+      if (stocked.length > 0) {
+        sources = stocked;
+      } else {
+        // No stock anywhere: stop here rather than dispatch an empty run.
+        return {};
+      }
+    }
+
     const source = sources[seed % sources.length];
     const sourceCluster = source.connectedRoadCluster;
 
@@ -1290,18 +694,45 @@ export class LogisticsAndTransportSystem {
     if (!cargoResource && source) {
       const sDef = BUILDINGS[source.defId];
       const outKeys = sDef?.recipe ? (Object.keys(sDef.recipe.outputs) as ResourceId[]) : [];
-      if (outKeys.length > 0) {
-        cargoResource = outKeys[seed % outKeys.length];
+      // Pick the first output this source still has stock of.
+      const stockedOut = outKeys.find(
+        (k) => this.getUnclaimedAmount(source.id, k, state) > 0
+      );
+      if (stockedOut) {
+        cargoResource = stockedOut;
         cargoAmount = 2;
       } else if (kind === 'cargo_truck') {
-        cargoResource = CARGO_FALLBACK_RESOURCES[seed % CARGO_FALLBACK_RESOURCES.length];
-        cargoAmount = 1;
+        const fallback = CARGO_FALLBACK_RESOURCES.find(
+          (k) => this.getUnclaimedAmount(source.id, k, state) > 0
+        );
+        if (fallback) {
+          cargoResource = fallback;
+          cargoAmount = 1;
+        }
       }
     }
 
-    void state;
     void roadNet;
     return { source, dest, cargoResource, cargoAmount };
+  }
+
+  private claimCargo(sourceId: number, resource: ResourceId, amount: number): void {
+    const key = `${sourceId}:${resource}`;
+    this.cargoClaims.set(key, (this.cargoClaims.get(key) ?? 0) + amount);
+  }
+
+  private releaseCargoClaim(sourceId: number | undefined, resource: ResourceId | undefined, amount: number): void {
+    if (sourceId === undefined || !resource) return;
+    const key = `${sourceId}:${resource}`;
+    const left = Math.max(0, (this.cargoClaims.get(key) ?? 0) - amount);
+    if (left <= 0) this.cargoClaims.delete(key);
+    else this.cargoClaims.set(key, left);
+  }
+
+  /** How much of a resource is still unclaimed across all in-flight vehicles. */
+  private getUnclaimedAmount(buildingId: number, resource: ResourceId, state: WorldEngineState): number {
+    const have = Math.floor(state.resources[resource] ?? 0);
+    return Math.max(0, have - (this.cargoClaims.get(`${buildingId}:${resource}`) ?? 0));
   }
 
   private assignTrip(
@@ -1324,11 +755,48 @@ export class LogisticsAndTransportSystem {
       veh.id + state.tick
     );
 
+    // Release the previous trip's claim before considering a new one.
+    this.releaseCargoClaim(veh.sourceBuildingId, veh.cargoResource, veh.cargoAmount ?? 0);
+
+    const FREIGHT_KINDS: RoadVehicleKind[] = [
+      'cargo_truck',
+      'delivery_van',
+      'fish_van',
+      'tractor',
+      'construction_truck',
+    ];
+    const isFreight = FREIGHT_KINDS.includes(veh.kind);
+
     veh.sourceBuildingId = source?.id;
     veh.destBuildingId = dest?.id;
     if (veh.returning) {
       veh.cargoResource = undefined;
       veh.cargoAmount = 0;
+    } else if (isFreight) {
+      // Never depart empty: freight vehicles only leave with goods that exist and
+      // are not already promised to another vehicle.
+      const deliverable =
+        source && cargoResource ? this.getUnclaimedAmount(source.id, cargoResource, state) : 0;
+      const loadable = Math.min(cargoAmount ?? 0, deliverable);
+      if (!source || !dest || !cargoResource || loadable <= 0) {
+        veh.cargoResource = undefined;
+        veh.cargoAmount = 0;
+        veh.route = [];
+        veh.routeIdx = 0;
+        veh.state = 'idle';
+        veh.speed = 0;
+        veh.waitTimer = 2.5;
+        veh.statusReason = !source
+          ? 'Parked: no building with road access produces freight'
+          : !dest
+            ? 'Parked: no reachable customer on this road network'
+            : `Parked: no unclaimed ${cargoResource} at source`;
+        veh.parked = true;
+        return false;
+      }
+      veh.cargoResource = cargoResource;
+      veh.cargoAmount = loadable;
+      this.claimCargo(source.id, cargoResource, loadable);
     } else {
       veh.cargoResource = cargoResource;
       veh.cargoAmount = cargoAmount;
@@ -1377,6 +845,7 @@ export class LogisticsAndTransportSystem {
             veh.progress = 0;
             veh.state = 'en_route';
             veh.blockedSec = 0;
+            veh.parked = false;
             veh.statusReason = veh.returning ? 'Returning empty on road' : 'Delivering freight on road';
             return true;
           }
@@ -1417,7 +886,10 @@ export class LogisticsAndTransportSystem {
     veh.routeIdx = 0;
     veh.state = 'idle';
     veh.speed = 0;
-    veh.waitTimer = 1.5;
+    veh.waitTimer = 3.0;
+    // No route at all: park instead of idling on the carriageway. The diagnostics
+    // panel reports this as `vehicle_unreachable` with the exact reason.
+    veh.parked = onRoadNow;
     veh.statusReason = 'Blocked: No connected road route';
     return false;
   }
@@ -1456,6 +928,7 @@ export class LogisticsAndTransportSystem {
       veh.state = 'idle';
       veh.speed = 0;
       veh.waitTimer = 2.0;
+      veh.parked = false;
       veh.statusReason = 'Halted: Road removed underneath vehicle';
       return;
     }
@@ -1494,6 +967,10 @@ export class LogisticsAndTransportSystem {
     state: WorldEngineState,
     onEvent?: (ev: TransportDeliveryEvent) => void
   ): void {
+    // Whatever happens next, this vehicle no longer holds the goods it carried.
+    this.releaseCargoClaim(veh.sourceBuildingId, veh.cargoResource, veh.cargoAmount ?? 0);
+    veh.cargoAmount = 0;
+    veh.cargoResource = undefined;
     if (veh.returning) return;
     const dest = veh.destBuildingId ? state.buildings.find((b) => b.id === veh.destBuildingId) : undefined;
     if (!dest) return;
@@ -1527,7 +1004,62 @@ export class LogisticsAndTransportSystem {
       }
     }
   }
+  // ===========================================================================
+  // Layer 2: traffic simulation
+  // ===========================================================================
 
+  /** Intersection reservation table: tile -> vehicle id currently crossing it. */
+  private junctionReservations = new Map<string, number>();
+  /** Vehicles currently traversing each directed edge (prev -> next). */
+  private edgeOccupation = new Map<string, RoadVehicleAgent[]>();
+  /**
+   * Freight already promised to a vehicle that has not delivered yet, keyed by
+   * `buildingId:resource`. This is what prevents two trucks from hauling the
+   * same goods out of the same factory in the same trip window.
+   */
+  private cargoClaims = new Map<string, number>();
+  private junctionHoldTimers = new Map<string, number>();
+
+  /**
+   * Lane index for a vehicle travelling in direction (dx, dy) on a given road.
+   *
+   * Roads are modelled as `lanesPerDirection` lanes per direction. Right-hand
+   * traffic: the lane offset grows with how many lanes exist, and vehicles moving
+   * in opposite directions are mirrored so they never overlap on the centreline.
+   */
+  private static getLaneIndex(
+    gx: number,
+    gy: number,
+    dx: number,
+    dy: number,
+    vehicleId: number,
+    chunks: ChunkManager
+  ): number {
+    const { chunk, index } = chunks.getTile(gx, gy);
+    const rt = chunk.roadType[index] as RoadType;
+    if (rt === RoadType.None || rt === RoadType.Rail) return 0;
+    const props = getRoadProperties(rt);
+    const lanes = Math.max(1, props.lanesPerDirection);
+    if (lanes <= 1) return 0;
+    // Larger vehicles hug the inner lane; small ones use the outer lane.
+    const heavy = props.widthClass === 'highway' ? 1 : 0;
+    return Math.min(lanes - 1, heavy + (vehicleId % 2 === 0 ? 0 : Math.min(lanes - 1, 1)));
+  }
+
+  private static laneOffsetFor(vehicleId: number, lanes: number, laneIndex: number, widthClass: string): number {
+    if (lanes <= 1) return 0;
+    const perLane = widthClass === 'highway' ? 0.075 : widthClass === 'wide' ? 0.07 : 0.055;
+    const centred = laneIndex - (lanes - 1) / 2;
+    // Right-hand traffic: keep the offset on the correct side of the centreline.
+    const side = vehicleId % 2 === 0 ? 1 : -1;
+    return side * (0.1 + Math.abs(centred) * perLane);
+  }
+
+  /**
+   * Main traffic step: lane-following movement, safe headway, signal compliance,
+   * intersection reservation (no gridlock into a blocked junction), queue
+   * formation and guaranteed deadlock recovery.
+   */
   private stepRoadVehicles(
     dtSec: number,
     state: WorldEngineState,
@@ -1538,9 +1070,12 @@ export class LogisticsAndTransportSystem {
   ): void {
     if (this.roadVehicles.length === 0 || this.roadSet.size === 0) return;
 
-    // Spatial bucket by integer grid tile for fast local following-distance & junction checks
+    const netVer = roadNet?.networkVersion ?? 1;
+
+    // ---- Spatial index: tile -> vehicles occupying it ----------------------
     const tileBuckets = new Map<string, RoadVehicleAgent[]>();
     for (const v of this.roadVehicles) {
+      if (v.parked) continue;
       const key = `${Math.round(v.gx)}:${Math.round(v.gy)}`;
       let list = tileBuckets.get(key);
       if (!list) {
@@ -1550,17 +1085,52 @@ export class LogisticsAndTransportSystem {
       list.push(v);
     }
 
-    const netVer = roadNet?.networkVersion ?? 1;
+    // Same-edge ordering map: lets a follower reason about the vehicle directly
+    // ahead even when both are mid-edge (tile buckets alone cannot express that).
+    this.edgeOccupation.clear();
+    for (const v of this.roadVehicles) {
+      if (v.parked) continue;
+      if (v.nextGx === v.prevGx && v.nextGy === v.prevGy) continue;
+      const k = `${v.prevGx}:${v.prevGy}>${v.nextGx}:${v.nextGy}`;
+      const list = this.edgeOccupation.get(k);
+      if (list) list.push(v);
+      else this.edgeOccupation.set(k, [v]);
+    }
+
+    // Intersection reservations must expire so a jam can always clear.
+    for (const [key, timer] of this.junctionHoldTimers.entries()) {
+      const next = timer - dtSec;
+      if (next <= 0) {
+        this.junctionHoldTimers.delete(key);
+        this.junctionReservations.delete(key);
+      } else {
+        this.junctionHoldTimers.set(key, next);
+      }
+    }
 
     for (const veh of this.roadVehicles) {
       const tx = Math.round(veh.gx);
       const ty = Math.round(veh.gy);
 
+      // Parked vehicles are inert: they keep their cargo claim/timeout ticking but
+      // never occupy a lane, so an idle fleet cannot gridlock an arterial.
+      if (veh.parked) {
+        veh.speed = 0;
+        veh.waitTimer -= dtSec;
+        if (veh.waitTimer <= 0) {
+          veh.parked = false;
+          this.assignTrip(veh, state, chunks, roadNet);
+        }
+        continue;
+      }
+
+      // ---- Off-network recovery (road removed underneath the vehicle) ----
       if (!this.roadSet.has(`${tx}:${ty}`)) {
         this.rerouteOrRecover(veh, state, chunks, roadNet);
         continue;
       }
 
+      // ---- Stationary states --------------------------------------------
       if (veh.state === 'loading' || veh.state === 'unloading' || veh.state === 'idle') {
         veh.speed = 0;
         veh.waitTimer -= dtSec;
@@ -1578,7 +1148,7 @@ export class LogisticsAndTransportSystem {
         continue;
       }
 
-      // Dynamic route invalidation when network changes (new/removed roads or flipped one-way rules)
+      // ---- Route invalidation after network edits -----------------------
       if (roadNet && veh.routeVersion !== netVer) {
         let routeIntact = veh.route.length > 0 && veh.routeIdx < veh.route.length;
         if (routeIntact) {
@@ -1603,11 +1173,12 @@ export class LogisticsAndTransportSystem {
         }
       }
 
-      // Pick next step if starting at a tile node
+      // ---- Pick the next edge when standing on a node -------------------
       if (veh.progress >= 1 || (veh.nextGx === veh.prevGx && veh.nextGy === veh.prevGy)) {
         if (veh.routeIdx >= veh.route.length) {
+          // Reached the end of the route: unload, then return trip.
           veh.state = 'unloading';
-          veh.waitTimer = veh.returning ? 0.6 : 0.9;
+          veh.waitTimer = veh.returning ? 0.55 : 0.85;
           veh.speed = 0;
           continue;
         }
@@ -1626,34 +1197,66 @@ export class LogisticsAndTransportSystem {
           continue;
         }
 
-        // Traffic signal obedience at signalized intersections
+        // ---- Road suitability: heavy vehicles refuse to shortcut ---------
+        const { chunk: nextChunk, index: nextIndex } = chunks.getTile(wp.gx, wp.gy);
+        const nextRoadType = nextChunk.roadType[nextIndex] as RoadType;
+        if (!isRoadAllowedForVehicle(nextRoadType, veh.vehicleClass) && veh.vehicleClass !== 'emergency') {
+          // Try to reroute rather than squeezing a truck down a residential lane.
+          this.rerouteOrRecover(veh, state, chunks, roadNet);
+          continue;
+        }
+
+        // ---- Traffic signals --------------------------------------------
         if (roadNet && veh.vehicleClass !== 'emergency') {
           const sig = roadNet.getSignalState(wp.gx, wp.gy, dx, dy, simTimeSec, chunks);
           if (sig === 'red') {
             veh.state = 'waiting_signal';
             veh.speed = 0;
+            // A red light is normal, not a block. Wait it out; only give up if the
+            // signal never releases (2 full cycles), which means the light is broken.
             veh.blockedSec += dtSec;
+            if (veh.blockedSec > 36) {
+              veh.blockedSec = 0;
+              this.rerouteOrRecover(veh, state, chunks, roadNet);
+            }
             continue;
           }
         }
 
-        // Intersection / next-tile occupancy yield check
-        const nextOcc = tileBuckets.get(`${wp.gx}:${wp.gy}`);
-        if (nextOcc && nextOcc.length > 0) {
-          const { chunk, index } = chunks.getTile(wp.gx, wp.gy);
-          const nrt = chunk.roadType[index] as RoadType;
-          const cap = Math.max(1, getRoadProperties(nrt).lanesPerDirection) + 1;
-          const blockedByAhead =
-            nextOcc.length >= cap ||
-            nextOcc.some(
-              (other) =>
-                other.id !== veh.id &&
-                other.progress < 0.42 &&
-                (other.vx !== dx || other.vy !== dy)
-            );
-          if (blockedByAhead && veh.blockedSec < 4.0) {
+        // ---- Intersection occupancy: never enter a blocked junction ------
+        const junction = roadNet?.getJunction(wp.gx, wp.gy);
+        if (junction && veh.blockedSec < 5) {
+          const key = `${wp.gx}:${wp.gy}`;
+          const holder = this.junctionReservations.get(key);
+          if (holder !== undefined && holder !== veh.id) {
             veh.state = 'waiting_traffic';
             veh.speed = 0;
+            veh.blockedSec += dtSec;
+            continue;
+          }
+          // Refuse to enter when the far side of the junction is congested.
+          const nextOcc = tileBuckets.get(`${wp.gx}:${wp.gy}`);
+          const cap = Math.max(1, getRoadProperties(nextRoadType).lanesPerDirection) + 1;
+          if (nextOcc && nextOcc.length >= cap) {
+            veh.state = 'waiting_traffic';
+            veh.speed = 0;
+            veh.blockedSec += dtSec;
+            continue;
+          }
+          this.junctionReservations.set(key, veh.id);
+          this.junctionHoldTimers.set(key, 2.5);
+        }
+
+        // ---- Headway: don't drive into an occupied next tile -------------
+        const nextOcc = tileBuckets.get(`${wp.gx}:${wp.gy}`);
+        if (nextOcc && nextOcc.length > 0 && veh.blockedSec < 6) {
+          const caps = Math.max(1, getRoadProperties(nextRoadType).lanesPerDirection) + 1;
+          const sameDirAhead = nextOcc.filter(
+            (o) => o.id !== veh.id && o.vx === dx && o.vy === dy && o.progress < 0.5
+          );
+          if (nextOcc.length >= caps || sameDirAhead.length > 0) {
+            veh.state = 'waiting_traffic';
+            veh.speed = Math.max(0, veh.speed - 8 * dtSec);
             veh.blockedSec += dtSec;
             continue;
           }
@@ -1678,39 +1281,63 @@ export class LogisticsAndTransportSystem {
         continue;
       }
 
-      // Safe following distance behind leader vehicle in the same lane/segment
+      // ---- Safe following distance behind the leader on the same edge -------
+      // Vehicles share an edge but never share a position: the follower is capped
+      // to the leader's speed and stopped completely inside the safety gap.
+      // Coincident vehicles are ordered deterministically by id so they always
+      // separate instead of drawing on top of each other.
+      const SAFE_GAP = 0.34;
+      const HARD_GAP = 0.22;
       let leaderCapSpeed = Infinity;
-      const localPeers = [
-        ...(tileBuckets.get(`${veh.prevGx}:${veh.prevGy}`) ?? []),
-        ...(tileBuckets.get(`${veh.nextGx}:${veh.nextGy}`) ?? []),
-      ];
-      for (const peer of localPeers) {
+      const edgeKey = `${veh.prevGx}:${veh.prevGy}>${veh.nextGx}:${veh.nextGy}`;
+      for (const peer of this.edgeOccupation.get(edgeKey) ?? []) {
         if (peer.id === veh.id) continue;
-        if (peer.prevGx === veh.prevGx && peer.prevGy === veh.prevGy && peer.nextGx === veh.nextGx && peer.nextGy === veh.nextGy) {
-          const gap = peer.progress - veh.progress;
-          if (gap > 0 && gap < 0.42) {
-            leaderCapSpeed = Math.min(leaderCapSpeed, peer.speed * 0.85);
-            if (gap < 0.25) {
-              leaderCapSpeed = 0;
-            }
-          }
+        const ahead = peer.progress > veh.progress + 1e-6 || (Math.abs(peer.progress - veh.progress) <= 1e-6 && peer.id < veh.id);
+        if (!ahead) continue;
+        const gap = peer.progress - veh.progress;
+        if (gap <= HARD_GAP) {
+          leaderCapSpeed = 0;
+        } else if (gap < SAFE_GAP) {
+          const t = (gap - HARD_GAP) / (SAFE_GAP - HARD_GAP);
+          leaderCapSpeed = Math.min(leaderCapSpeed, peer.speed * (0.35 + t * 0.55));
+        } else if (gap < SAFE_GAP + 0.3) {
+          leaderCapSpeed = Math.min(leaderCapSpeed, peer.speed * 0.95);
         }
       }
 
+      // ---- Speed: road geometry + quality + congestion -------------------
       const { chunk, index } = chunks.getTile(tx, ty);
       const rt = chunk.roadType[index] as RoadType;
+      const props = getRoadProperties(rt);
       const roadSpeedMult = ROADS[rt]?.speedMultiplier ?? 1.0;
       const cong = roadNet?.getTileCongestion(tx, ty) ?? 0;
+      const laneCount = Math.max(1, props.lanesPerDirection);
+      // Wider roads relieve congestion pressure rather than adding it.
+      const laneRelief = 1 + Math.min(0.35, (laneCount - 1) * 0.12);
+      const qualityFactor = 0.75 + props.qualityBase * 0.3;
+      const suitabilityFactor = isRoadAllowedForVehicle(rt, veh.vehicleClass)
+        ? 1
+        : veh.vehicleClass === 'heavy_truck'
+          ? 0.55
+          : 0.85;
+
       const desiredSpeed = Math.min(
         leaderCapSpeed,
-        veh.maxSpeed * Math.min(2.3, roadSpeedMult) * Math.max(0.45, 1 - cong * 0.45)
+        veh.maxSpeed *
+          Math.min(2.4, roadSpeedMult) *
+          Math.max(0.4, 1 - cong * 0.5) *
+          laneRelief *
+          qualityFactor *
+          suitabilityFactor
       );
 
       if (desiredSpeed <= 0.05) {
-        veh.speed = Math.max(0, veh.speed - 7.5 * dtSec);
+        veh.speed = Math.max(0, veh.speed - 8 * dtSec);
         veh.state = 'waiting_traffic';
         veh.blockedSec += dtSec;
-        if (veh.blockedSec > 4.2) {
+        if (veh.blockedSec > 5) {
+          // Deadlock breaker: force a reroute (or recovery) so jams always clear.
+          veh.blockedSec = 0;
           this.rerouteOrRecover(veh, state, chunks, roadNet);
         }
         continue;
@@ -1726,12 +1353,27 @@ export class LogisticsAndTransportSystem {
       veh.progress = Math.min(1, veh.progress + veh.speed * dtSec);
       veh.gx = veh.prevGx + dirX * veh.progress;
       veh.gy = veh.prevGy + dirY * veh.progress;
-      veh.laneOffset = getLaneOffsetForTile(tx, ty, veh.id, chunks);
+
+      // Keep the vehicle exactly on its lane path (never on the sidewalk).
+      const laneIndex = LogisticsAndTransportSystem.getLaneIndex(
+        tx,
+        ty,
+        dirX,
+        dirY,
+        veh.id,
+        chunks
+      );
+      veh.laneOffset = LogisticsAndTransportSystem.laneOffsetFor(veh.id, laneCount, laneIndex, props.widthClass);
 
       if (veh.progress >= 1) {
         veh.gx = veh.nextGx;
         veh.gy = veh.nextGy;
         veh.routeIdx += 1;
+        const key = `${veh.nextGx}:${veh.nextGy}`;
+        if (this.junctionReservations.get(key) === veh.id) {
+          this.junctionReservations.delete(key);
+          this.junctionHoldTimers.delete(key);
+        }
       }
     }
   }

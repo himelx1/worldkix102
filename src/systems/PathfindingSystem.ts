@@ -1,5 +1,5 @@
 import { BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
-import { getRoadProperties, ROADS, RoadType } from '../data/roads.data';
+import { getRoadProperties, isRoadAllowedForVehicle, ROADS, RoadType } from '../data/roads.data';
 import type { ChunkManager } from '../core/ChunkManager';
 import { BiomeId, BuildingInstance, RoadDirection, TileFlag, VehicleClass } from '../core/GameState';
 import { RoadNetworkSystem } from './RoadNetworkSystem';
@@ -116,6 +116,23 @@ export class PathfindingSystem {
     return true;
   }
 
+  /**
+   * Layer-1 traversal rule used by route planning: a heavy vehicle may not enter
+   * a road that is structurally too narrow for it (unless it is the only way out
+   * of a dead end, which the A* relaxes via `allowUnsuitable`).
+   */
+  public static isTileSuitableForVehicle(
+    gx: number,
+    gy: number,
+    chunks: ChunkManager,
+    vehicleClass: VehicleClass
+  ): boolean {
+    const { chunk, index } = chunks.getTile(gx, gy);
+    const road = chunk.roadType[index] as RoadType;
+    if (road === RoadType.None || road === RoadType.Rail) return false;
+    return isRoadAllowedForVehicle(road, vehicleClass);
+  }
+
   public static getTileStepCost(
     gx: number,
     gy: number,
@@ -162,6 +179,14 @@ export class PathfindingSystem {
         }
       } else if (vClass === 'emergency') {
         if (props.widthClass === 'highway' || props.widthClass === 'wide') cost *= 0.75;
+      }
+
+      // Structural suitability: heavy vehicles strongly prefer roads built for
+      // them. A class that is *not permitted* at all gets a near-prohibitive cost
+      // so a route only uses it when there is literally no alternative; the
+      // traffic step then treats it as a reroute (never a silent shortcut).
+      if (!isRoadAllowedForVehicle(road, vClass)) {
+        cost *= vClass === 'heavy_truck' ? 9.0 : 4.0;
       }
 
       const cong = opts?.congestionMap?.get(`${gx}:${gy}`) ?? 0;

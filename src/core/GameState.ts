@@ -3,7 +3,7 @@ import type { BuildingCategory, WorkerClass } from '../data/buildings.data';
 import type { PolicyId } from '../data/policies.data';
 import type { RoadType } from '../data/roads.data';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export type WorldEventId =
   | 'merchant_caravan'
@@ -203,7 +203,126 @@ export type UtilityFailureReason =
   | 'disconnected_section_no_source'
   | 'source_inactive'
   | 'distribution_overloaded'
-  | 'insufficient_supply';
+  | 'insufficient_supply'
+  | 'not_in_footprint';
+
+/** Fleet counters shared by any building that dispatches trucks. */
+export interface FleetSummary {
+  total: number;
+  available: number;
+  active: number;
+  cargo: number;
+  waiting: number;
+  returning: number;
+  blocked: number;
+  destinations: string[];
+}
+
+/** Vehicle-level diagnostic record surfaced by the network diagnostics tool. */
+export interface VehicleDiagnostic {
+  id: number;
+  kind: string;
+  state: string;
+  gx: number;
+  gy: number;
+  routeLength: number;
+  routeIdx: number;
+  destination: string;
+  roadCluster: number;
+  blockedReason?: string;
+  failureCode?: string;
+  congestion: number;
+}
+
+/** Single diagnostic finding with a stable code so the UI can group/triage. */
+export interface NetworkDiagnosticIssue {
+  code:
+    | 'road_endpoint_unconnected'
+    | 'intersection_missing'
+    | 'connector_unlinked'
+    | 'connector_not_on_border'
+    | 'building_no_road_access'
+    | 'building_road_tier_too_low'
+    | 'vehicle_unreachable'
+    | 'vehicle_road_unsuitable'
+    | 'utility_no_supplier'
+    | 'utility_disconnected'
+    | 'utility_distribution_overloaded'
+    | 'utility_insufficient_supply'
+    | 'forestry_no_mature_trees'
+    | 'forestry_no_connector'
+    | 'forestry_duplicate_job'
+    | 'tree_density_limit';
+  layer: 'road' | 'utility' | 'vehicle' | 'forestry';
+  severity: 'error' | 'warning' | 'info';
+  gx: number;
+  gy: number;
+  title: string;
+  detail: string;
+  buildingId?: number;
+  vehicleId?: number;
+}
+
+export interface NetworkDiagnosticsSnapshot {
+  generatedTick: number;
+  road: NetworkDiagnosticIssue[];
+  utility: NetworkDiagnosticIssue[];
+  vehicle: NetworkDiagnosticIssue[];
+  forestry: NetworkDiagnosticIssue[];
+  counts: {
+    roadErrors: number;
+    utilityErrors: number;
+    vehicleErrors: number;
+    forestryWarnings: number;
+  };
+}
+
+export interface UtilityNetworkSummary {
+  powerConnectedCount: number;
+  powerDisconnectedCount: number;
+  powerBrownoutCount: number;
+  waterConnectedCount: number;
+  waterDisconnectedCount: number;
+  waterShortageCount: number;
+  serviceCoveragePct: number;
+  /** Independent layer-3 diagnostics (not derived from road connectivity). */
+  powerNetworkCount?: number;
+  waterNetworkCount?: number;
+  powerDisconnectedTiles?: number;
+  waterDisconnectedTiles?: number;
+  powerOverloadedNetworks?: number;
+  waterOverloadedNetworks?: number;
+}
+
+/**
+ * Tree lifecycle stage.
+ * - `empty`: harvested / cleared ground waiting for natural reseeding (locked land only)
+ * - `sapling`: stage 1
+ * - `young`: stage 2 (medium tree)
+ * - `mature`: stage 3, harvestable
+ */
+export type TreeGrowthStage = 'empty' | 'sapling' | 'young' | 'mature';
+
+/** Compact persisted encoding for TreeGrowthStage (one byte per tile). */
+export const enum TreeStage {
+  Empty = 0,
+  Sapling = 1,
+  Young = 2,
+  Mature = 3,
+}
+
+export function treeStageToName(stage: number): TreeGrowthStage {
+  switch (stage) {
+    case TreeStage.Sapling:
+      return 'sapling';
+    case TreeStage.Young:
+      return 'young';
+    case TreeStage.Mature:
+      return 'mature';
+    default:
+      return 'empty';
+  }
+}
 
 export interface TreeRegrowthEntry {
   gx: number;
@@ -211,6 +330,54 @@ export interface TreeRegrowthEntry {
   species: number;
   saplingAtTick: number;
   readyAtTick: number;
+  /** Lifecycle stage persisted across saves (defaults to derived stage for legacy entries). */
+  stage?: TreeGrowthStage;
+  /** Tick at which the entry advanced into `stage`. */
+  stageStartedTick?: number;
+  /** True when this entry was created by harvesting (prevents instant replacement). */
+  harvested?: boolean;
+}
+
+/** Persistent tracking of forestry work zones so trucks are not repeatedly sent to stripped areas. */
+export interface ForestryWorkZoneRecord {
+  id: string;
+  /** Zone anchor (locked-land forest block centroid). */
+  gx: number;
+  gy: number;
+  /** Last tick this location was harvested. */
+  lastHarvestTick: number;
+  /** Mature trees counted at the last survey. */
+  matureTrees: number;
+  /** Number of trees removed from this location in total. */
+  harvestedTotal: number;
+  /** Cooldown tick before this location may be selected again. */
+  cooldownUntilTick: number;
+}
+
+export type ForestryTruckState =
+  | 'idle_at_factory'
+  | 'to_pickup'
+  | 'to_forest'
+  | 'crew_working'
+  | 'stockpiling'
+  | 'to_factory'
+  | 'unloading'
+  | 'blocked';
+
+/** Per-worker crew member that walks out of the truck, fells a tree and carries logs back. */
+export interface ForestryCrewMember {
+  id: number;
+  gx: number;
+  gy: number;
+  phase: 'in_truck' | 'walking_to_tree' | 'chopping' | 'carrying' | 'walking_to_truck';
+  targetGx: number;
+  targetGy: number;
+  reservedTreeGx: number;
+  reservedTreeGy: number;
+  carryingLogs: number;
+  facing: 1 | -1;
+  chopTimer: number;
+  treesFelled: number;
 }
 
 export interface LoggingTruckAgent {
@@ -220,16 +387,12 @@ export interface LoggingTruckAgent {
   gy: number;
   targetGx: number;
   targetGy: number;
-  state:
-    | 'idle_at_factory'
-    | 'to_forest'
-    | 'worker_chopping'
-    | 'chopping'
-    | 'to_factory'
-    | 'delivering_sawmill'
-    | 'blocked';
+  state: ForestryTruckState;
   cargoTimber: number;
   cargoCapacity?: number;
+  /** Target number of trees this trip should fell (cargo driven). */
+  tripTargetTrees?: number;
+  treesFelledThisTrip?: number;
   harvestTimer: number;
   facing: number;
   route?: Array<{ gx: number; gy: number }>;
@@ -248,6 +411,12 @@ export interface LoggingTruckAgent {
   workerPhase?: 'walking_to_tree' | 'chopping' | 'returning_to_truck';
   workerFacing?: 1 | -1;
   statusReason?: string;
+  /** Assigned forestry work zone id. */
+  workZoneId?: string;
+  /** Persisted crew of 5-6 forestry workers riding in the truck. */
+  crew?: ForestryCrewMember[];
+  /** Last route failure classification for diagnostics. */
+  failureCode?: string;
 }
 
 export interface TrainAgent {
@@ -291,6 +460,11 @@ export interface RoadVehicleAgent {
   cargoAmount?: number;
   returning?: boolean;
   statusReason?: string;
+  /**
+   * A parked vehicle is idle with nothing to haul. It is excluded from lane
+   * occupancy so it can never permanently block a road.
+   */
+  parked?: boolean;
 }
 
 export interface CorporateSectorStats {
@@ -332,6 +506,8 @@ export interface ChunkData {
   zoneType: Uint8Array;
   // Road lane/one-way direction metadata (0=TwoWay, 1=N, 2=E, 3=S, 4=W)
   roadDir: Uint8Array;
+  // Tree lifecycle stage (0=empty, 1=sapling, 2=young, 3=mature) — schema v3
+  featureStage: Uint8Array;
 }
 
 export type BuildingStatus =
@@ -376,6 +552,12 @@ export interface BuildingInstance {
   powerReason?: UtilityFailureReason;
   waterReason?: UtilityFailureReason;
   roadReason?: string;
+  /** Road-layer diagnostics: why access failed, if it did. */
+  roadDiagnosticCode?: NetworkDiagnosticIssue['code'];
+  /** Fleet telemetry for buildings that dispatch trucks. */
+  fleet?: FleetSummary;
+  /** Actual vs theoretical production (already partially used by ProductionSystem). */
+  actualInputConsumptionRate?: number;
 }
 
 export interface CityRecord {
@@ -402,16 +584,6 @@ export interface CityEconomySnapshot {
   wageExpense: number;
   net: number;
   buildingCount: number;
-}
-
-export interface UtilityNetworkSummary {
-  powerConnectedCount: number;
-  powerDisconnectedCount: number;
-  powerBrownoutCount: number;
-  waterConnectedCount: number;
-  waterDisconnectedCount: number;
-  waterShortageCount: number;
-  serviceCoveragePct: number;
 }
 
 export type AgeGroup = 'child' | 'underage' | 'adult' | 'elderly';
@@ -621,6 +793,10 @@ export interface WorldEngineState {
   loggingStats?: LoggingOperationStats;
   corporateStats?: CorporateSectorStats[];
   treeRegrowthQueue?: TreeRegrowthEntry[];
+  /** Forestry work-zone ledger (persisted, prevents re-sending trucks to stripped areas). */
+  forestryWorkZones?: ForestryWorkZoneRecord[];
+  /** Cached network diagnostics; recomputed on demand by the diagnostics tool. */
+  networkDiagnostics?: NetworkDiagnosticsSnapshot;
 }
 
 export interface TileInspection {

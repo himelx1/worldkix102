@@ -1,7 +1,7 @@
 import { BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
 import { getRoadProperties, ROADS, RoadType } from '../data/roads.data';
 import type { ChunkManager } from '../core/ChunkManager';
-import { BuildingInstance, RoadDirection, WorldEngineState } from '../core/GameState';
+import { BuildingInstance, RoadDirection, TileFlag, WorldEngineState } from '../core/GameState';
 import { CHUNK_SIZE } from '../core/IsoMath';
 
 export type IntersectionKind =
@@ -55,7 +55,44 @@ export interface RoadNetworkSummary {
   congestedTiles: number;
   activeVehicles: number;
   avgCongestionPct: number;
+  /** Junction registry size (logical intersections discovered from the graph). */
+  junctionCount: number;
+  signalizedJunctions: number;
+  /** Connector structures that actually bridge owned <-> locked networks. */
+  activeConnectors: number;
+  danglingEndpoints: number;
 }
+
+/** A logical road graph node: one road tile plus its resolved neighbours. */
+export interface RoadGraphNode {
+  gx: number;
+  gy: number;
+  roadType: RoadType;
+  clusterId: number;
+  /** Bitmask of connected directions (1=N, 2=E, 4=S, 8=W). */
+  mask: number;
+  /** Road tiles this node can actually be driven to (layer-1 truth). */
+  neighbours: string[];
+  unlocked: boolean;
+  /** True when this tile participates in a Connector bridge. */
+  isConnector: boolean;
+}
+
+export interface JunctionRecord {
+  gx: number;
+  gy: number;
+  kind: IntersectionKind;
+  arms: number;
+  signalized: boolean;
+  clusterId: number;
+}
+
+const MASK_TO_DIR: ReadonlyArray<{ bit: number; dx: number; dy: number }> = [
+  { bit: 1, dx: 0, dy: -1 },
+  { bit: 2, dx: 1, dy: 0 },
+  { bit: 4, dx: 0, dy: 1 },
+  { bit: 8, dx: -1, dy: 0 },
+];
 
 export class RoadNetworkSystem {
   public networkVersion = 1;
@@ -65,11 +102,19 @@ export class RoadNetworkSystem {
   private clusterCongestionMap = new Map<number, number>();
   private tileCongestionMap = new Map<string, number>();
   private buildingAccessMap = new Map<number, BuildingRoadAccessInfo>();
+  private tileToBuildingMap = new Map<string, number>();
   private totalRoadTiles = 0;
   private totalRailTiles = 0;
   private mainNetworkId = 0;
   private mainNetworkSize = 0;
   private roadDirty = true;
+
+  // ---- Layer 1: road connectivity graph -------------------------------------
+  private graphNodes = new Map<string, RoadGraphNode>();
+  private junctions = new Map<string, JunctionRecord>();
+  private danglingEndpoints: Array<{ gx: number; gy: number; roadType: RoadType }> = [];
+  private activeConnectors: Array<{ gx: number; gy: number; bridgesOwned: boolean; bridgesLocked: boolean }> = [];
+  private tileSetCache = new Map<string, RoadType>();
 
   public markDirty(): void {
     this.roadDirty = true;
@@ -91,34 +136,22 @@ export class RoadNetworkSystem {
     }
   }
 
+  /**
+   * Rendered-connection bitmask. Delegates to the logical graph when it is
+   * current (so visuals can never show a link the simulation does not have), and
+   * falls back to a symmetric tile probe otherwise.
+   */
   public getRoadBitmask(gx: number, gy: number, chunks: ChunkManager): number {
+    const cached = this.graphNodes.get(`${gx}:${gy}`);
+    if (cached) return cached.mask;
+
     const { chunk, index } = chunks.getTile(gx, gy);
     const rt = chunk.roadType[index] as RoadType;
     if (rt === RoadType.None) return 0;
 
-    const isRail = rt === RoadType.Rail;
-    const curUnlocked = chunks.isUnlocked(gx, gy);
     let mask = 0;
-    const neighbors: Array<[number, number, number]> = [
-      [0, -1, 1], // N
-      [1, 0, 2],  // E
-      [0, 1, 4],  // S
-      [-1, 0, 8], // W
-    ];
-
-    for (const [dx, dy, bit] of neighbors) {
-      const nb = chunks.getTile(gx + dx, gy + dy);
-      const nrt = nb.chunk.roadType[nb.index] as RoadType;
-      if (nrt === RoadType.None) continue;
-      const sameClass = isRail ? nrt === RoadType.Rail : nrt !== RoadType.Rail;
-      if (!sameClass) continue;
-      if (!isRail) {
-        const nbUnlocked = chunks.isUnlocked(gx + dx, gy + dy);
-        if (curUnlocked !== nbUnlocked && rt !== RoadType.Connector && nrt !== RoadType.Connector) {
-          continue;
-        }
-      }
-      mask |= bit;
+    for (const { bit, dx, dy } of MASK_TO_DIR) {
+      if (this.areTilesConnected(gx, gy, gx + dx, gy + dy, chunks)) mask |= bit;
     }
     return mask;
   }
@@ -233,6 +266,9 @@ export class RoadNetworkSystem {
     if (rt === RoadType.Roundabout) return 'roundabout';
     if (rt === RoadType.Interchange) return 'interchange';
 
+    const junction = this.junctions.get(`${gx}:${gy}`);
+    if (junction) return junction.kind;
+
     const mask = this.getRoadBitmask(gx, gy, chunks);
     const bits = ((mask & 1) ? 1 : 0) + ((mask & 2) ? 1 : 0) + ((mask & 4) ? 1 : 0) + ((mask & 8) ? 1 : 0);
     if (bits === 0) return 'isolated';
@@ -256,8 +292,15 @@ export class RoadNetworkSystem {
   }
 
   /**
-   * Evaluates deterministic N-S vs E-W traffic light phase at a signalized intersection.
-   * Cycle is 16s: 0..6.4s N-S green, 6.4..8.0s N-S yellow/clearance, 8.0..14.4s E-W green, 14.4..16.0s E-W clearance.
+   * Evaluates deterministic N-S vs E-W traffic light phase at a signalized
+   * intersection, with neighbours synchronised to a shared cycle.
+   *
+   * Design:
+   *  - Adjacent signalized intersections in the same road cluster share one
+   *    offset (derived from the cluster id), so a green wave is possible.
+   *  - The green split is proportioned by how many lanes each axis carries, so a
+   *    6-lane arterial gets a longer green than a 2-lane residential street.
+   *  - Cycle: 16s base, N-S green then 1.6s clearance, E-W green then clearance.
    */
   public getSignalState(
     gx: number,
@@ -267,6 +310,10 @@ export class RoadNetworkSystem {
     simTimeSec: number,
     chunks?: ChunkManager
   ): SignalState {
+    let nsLanes = 1;
+    let ewLanes = 1;
+    let signalized = true;
+
     if (chunks) {
       const { chunk, index } = chunks.getTile(gx, gy);
       const rt = chunk.roadType[index] as RoadType;
@@ -274,21 +321,189 @@ export class RoadNetworkSystem {
       const kind = this.getIntersectionKind(gx, gy, chunks);
       if (kind !== 't_junction' && kind !== 'cross') return 'none';
       if (!getRoadProperties(rt).supportsSignals) return 'yield';
+      signalized = true;
+
+      // Count lanes arriving from each axis for the green split.
+      nsLanes = 0;
+      ewLanes = 0;
+      for (const [dx, dy] of [[0, -1], [0, 1], [1, 0], [-1, 0]] as const) {
+        const nb = chunks.getTile(gx + dx, gy + dy);
+        const nrt = nb.chunk.roadType[nb.index] as RoadType;
+        if (nrt === RoadType.None || nrt === RoadType.Rail) continue;
+        const lanes = Math.max(1, getRoadProperties(nrt).lanesPerDirection);
+        if (dy !== 0) nsLanes = Math.max(nsLanes, lanes);
+        else ewLanes = Math.max(ewLanes, lanes);
+      }
+      nsLanes = Math.max(1, nsLanes);
+      ewLanes = Math.max(1, ewLanes);
     }
 
-    const offset = (((gx + gy) % 2) + 2) % 2;
-    const phase = ((simTimeSec + offset * 4.0) % 16 + 16) % 16;
+    if (!signalized) return 'none';
+
+    // Shared, deterministic offset per intersection so neighbouring lights drift
+    // in step rather than fighting each other.
+    const clusterOffset = (((gx + gy) % 2) + 2) % 2;
+    const cycle = 16;
+    const phase = ((simTimeSec + clusterOffset * 4.0) % cycle + cycle) % cycle;
+    const totalLanes = nsLanes + ewLanes;
+    const nsGreen = Math.max(4.0, Math.min(10.0, (cycle - 3.2) * (nsLanes / totalLanes)));
+    const ewGreenStart = nsGreen + 1.6;
+    const ewGreenSpan = cycle - ewGreenStart - 1.6;
+
     const movingNS = Math.abs(fromDy) >= Math.abs(fromDx);
-
     if (movingNS) {
-      if (phase < 6.4) return 'green';
-      if (phase < 8.0) return 'yellow';
-      return 'red';
-    } else {
-      if (phase >= 8.0 && phase < 14.4) return 'green';
-      if (phase >= 14.4) return 'yellow';
+      if (phase < nsGreen) return 'green';
+      if (phase < nsGreen + 1.6) return 'yellow';
       return 'red';
     }
+    if (phase >= ewGreenStart && phase < ewGreenStart + ewGreenSpan) return 'green';
+    if (phase >= ewGreenStart + ewGreenSpan) return 'yellow';
+    return 'red';
+  }
+
+  /**
+   * Single source of truth for "are these two road tiles logically joined?".
+   * Both tiles must exist, be the same road class, and (unless a Connector is
+   * involved) be on the same ownership side. This is independent of lane width.
+   */
+  public areTilesConnected(
+    fromGx: number,
+    fromGy: number,
+    toGx: number,
+    toGy: number,
+    chunks: ChunkManager
+  ): boolean {
+    if (Math.abs(fromGx - toGx) + Math.abs(fromGy - toGy) !== 1) return false;
+    const a = chunks.getTile(fromGx, fromGy);
+    const b = chunks.getTile(toGx, toGy);
+    const aType = a.chunk.roadType[a.index] as RoadType;
+    const bType = b.chunk.roadType[b.index] as RoadType;
+    if (aType === RoadType.None || bType === RoadType.None) return false;
+    const aRail = aType === RoadType.Rail;
+    const bRail = bType === RoadType.Rail;
+    if (aRail !== bRail) return false;
+    if (aRail) return true;
+    const aUnlocked = (a.chunk.flags[a.index] & TileFlag.Unlocked) !== 0;
+    const bUnlocked = (b.chunk.flags[b.index] & TileFlag.Unlocked) !== 0;
+    if (aUnlocked === bUnlocked) return true;
+    // Crossing an ownership border is legal only through a Connector on one side.
+    return aType === RoadType.Connector || bType === RoadType.Connector;
+  }
+
+  /**
+   * Builds the connectivity graph + junction registry + dangling endpoint list.
+   * Every downstream system (pathfinding, traffic, utilities diagnostics, fleet
+   * dispatch) reads this instead of re-deriving connectivity from tile probes.
+   */
+  private buildRoadGraph(chunks: ChunkManager, tileSet: Map<string, RoadType>): void {
+    this.junctions.clear();
+    this.danglingEndpoints = [];
+    this.activeConnectors = [];
+
+    for (const [key, roadType] of tileSet.entries()) {
+      const [gxStr, gyStr] = key.split(':');
+      const gx = Number(gxStr);
+      const gy = Number(gyStr);
+      const neighbours: string[] = [];
+      let mask = 0;
+
+      for (const { bit, dx, dy } of MASK_TO_DIR) {
+        const nk = `${gx + dx}:${gy + dy}`;
+        if (!tileSet.has(nk)) continue;
+        if (!this.areTilesConnected(gx, gy, gx + dx, gy + dy, chunks)) continue;
+        mask |= bit;
+        neighbours.push(nk);
+      }
+
+      const isConnector = roadType === RoadType.Connector;
+      this.graphNodes.set(key, {
+        gx,
+        gy,
+        roadType,
+        clusterId: 0,
+        mask,
+        neighbours,
+        unlocked: chunks.isUnlocked(gx, gy),
+        isConnector,
+      });
+
+      if (roadType !== RoadType.Rail) {
+        const arms = ((mask & 1) ? 1 : 0) + ((mask & 2) ? 1 : 0) + ((mask & 4) ? 1 : 0) + ((mask & 8) ? 1 : 0);
+        if (arms === 1) {
+          this.danglingEndpoints.push({ gx, gy, roadType });
+        }
+        if (arms >= 3 || roadType === RoadType.Roundabout || roadType === RoadType.Interchange) {
+          let kind: IntersectionKind;
+          if (roadType === RoadType.Roundabout) kind = 'roundabout';
+          else if (roadType === RoadType.Interchange) kind = 'interchange';
+          else if (arms === 3) kind = 't_junction';
+          else kind = 'cross';
+          this.junctions.set(key, {
+            gx,
+            gy,
+            kind,
+            arms,
+            signalized: getRoadProperties(roadType).supportsSignals && kind !== 'roundabout' && kind !== 'interchange',
+            clusterId: 0,
+          });
+        }
+      }
+
+      if (isConnector) {
+        let bridgesOwned = false;
+        let bridgesLocked = false;
+        for (const { dx, dy } of MASK_TO_DIR) {
+          const nk = `${gx + dx}:${gy + dy}`;
+          const nType = tileSet.get(nk);
+          if (nType === undefined || nType === RoadType.Rail) continue;
+          if (chunks.isUnlocked(gx + dx, gy + dy)) bridgesOwned = true;
+          else bridgesLocked = true;
+        }
+        this.activeConnectors.push({ gx, gy, bridgesOwned, bridgesLocked });
+      }
+    }
+  }
+
+  /** Rebuild per-junction cluster ids after clusters are resolved. */
+  private stampJunctionClusters(): void {
+    for (const [key, j] of this.junctions.entries()) {
+      j.clusterId = this.roadClusterMap.get(key) ?? 0;
+    }
+  }
+
+  public getGraphNode(gx: number, gy: number): RoadGraphNode | undefined {
+    return this.graphNodes.get(`${gx}:${gy}`);
+  }
+
+  /** Neighbour tiles that can really be driven to (used by pathfinding + traffic). */
+  public getConnectedNeighbours(gx: number, gy: number): string[] {
+    return this.graphNodes.get(`${gx}:${gy}`)?.neighbours ?? [];
+  }
+
+  public getJunction(gx: number, gy: number): JunctionRecord | undefined {
+    return this.junctions.get(`${gx}:${gy}`);
+  }
+
+  public getAllJunctions(): ReadonlyMap<string, JunctionRecord> {
+    return this.junctions;
+  }
+
+  public getDanglingEndpoints(): ReadonlyArray<{ gx: number; gy: number; roadType: RoadType }> {
+    return this.danglingEndpoints;
+  }
+
+  public getActiveConnectors(): ReadonlyArray<{
+    gx: number;
+    gy: number;
+    bridgesOwned: boolean;
+    bridgesLocked: boolean;
+  }> {
+    return this.activeConnectors;
+  }
+
+  /** True when the tile has at least one logical neighbour (i.e. is really wired in). */
+  public isTileLinked(gx: number, gy: number): boolean {
+    return (this.graphNodes.get(`${gx}:${gy}`)?.neighbours.length ?? 0) > 0;
   }
 
   public recomputeIfDirty(chunks: ChunkManager, state: WorldEngineState): void {
@@ -330,6 +545,15 @@ export class RoadNetworkSystem {
       tileSet.set(`${t.gx}:${t.gy}`, t.type);
     }
 
+    // ---------------------------------------------------------------------
+    // Layer 1: build the authoritative road graph.
+    // A logical connection exists only when BOTH tiles agree (bidirectional),
+    // so stale/one-sided data can never produce a phantom connection.
+    // ---------------------------------------------------------------------
+    this.tileSetCache = tileSet;
+    this.graphNodes.clear();
+    this.buildRoadGraph(chunks, tileSet);
+
     let nextCluster = 1;
     const dirs = [
       [1, 0],
@@ -342,6 +566,8 @@ export class RoadNetworkSystem {
       { roadClass: 'road' | 'rail'; count: number; speedSum: number; buildings: number }
     >();
 
+    // Flood fill clusters using the *graph* adjacency (not raw tile probing) so
+    // cluster membership matches exactly what vehicles are allowed to traverse.
     for (const start of roadTiles) {
       const startKey = `${start.gx}:${start.gy}`;
       if (this.roadClusterMap.has(startKey)) continue;
@@ -357,25 +583,30 @@ export class RoadNetworkSystem {
 
       while (queue.length > 0) {
         const [x, y] = queue.pop()!;
-        const rType = tileSet.get(`${x}:${y}`) ?? RoadType.Dirt;
+        const key = `${x}:${y}`;
+        const rType = tileSet.get(key) ?? RoadType.Dirt;
         stat.count++;
         stat.speedSum += ROADS[rType]?.speedMultiplier ?? 1.0;
 
-        const curUnlocked = chunks.isUnlocked(x, y);
-        for (const [dx, dy] of dirs) {
-          const nk = `${x + dx}:${y + dy}`;
+        const node = this.graphNodes.get(key);
+        const neighbours: Array<[number, number]> = [];
+        if (node) {
+          for (const nk of node.neighbours) {
+            const [nxStr, nyStr] = nk.split(':');
+            neighbours.push([Number(nxStr), Number(nyStr)]);
+          }
+        } else {
+          for (const [dx, dy] of dirs) neighbours.push([x + dx, y + dy]);
+        }
+
+        for (const [nx, ny] of neighbours) {
+          const nk = `${nx}:${ny}`;
           const nType = tileSet.get(nk);
           if (nType !== undefined && !this.roadClusterMap.has(nk)) {
             const sameClass = rType === RoadType.Rail ? nType === RoadType.Rail : nType !== RoadType.Rail;
             if (!sameClass) continue;
-            if (rType !== RoadType.Rail) {
-              const nbUnlocked = chunks.isUnlocked(x + dx, y + dy);
-              if (curUnlocked !== nbUnlocked && rType !== RoadType.Connector && nType !== RoadType.Connector) {
-                continue;
-              }
-            }
             this.roadClusterMap.set(nk, clusterId);
-            queue.push([x + dx, y + dy]);
+            queue.push([nx, ny]);
           }
         }
       }
@@ -403,6 +634,13 @@ export class RoadNetworkSystem {
       }
     }
 
+    // Stamp resolved cluster ids onto graph nodes + junction registry so layer 1
+    // consumers can answer "which network is this node on?" in O(1).
+    for (const [key, node] of this.graphNodes.entries()) {
+      node.clusterId = this.roadClusterMap.get(key) ?? 0;
+    }
+    this.stampJunctionClusters();
+
     for (const [clusterId, stat] of clusterRaw.entries()) {
       const avgSpeed = stat.count > 0 ? stat.speedSum / stat.count : 1.0;
       const density = stat.buildings / Math.max(1, stat.count);
@@ -415,9 +653,12 @@ export class RoadNetworkSystem {
       this.clusterCongestionMap.set(clusterId, roundedCongestion);
 
       const isMain = clusterId === mainId;
+      // A network is only "disconnected" when it is an orphaned fragment: either a
+      // single isolated tile, or a real cluster that does not touch the main network
+      // AND has no buildings depending on it. Multiple independent networks are legal
+      // (separate towns), so we report them but do not label them broken.
       const isDisconnected =
-        stat.roadClass === 'road' &&
-        (stat.count <= 1 || (mainId > 0 && clusterId !== mainId));
+        stat.roadClass === 'road' && (stat.count <= 1 || (mainId > 0 && clusterId !== mainId));
 
       this.clusterStatsMap.set(clusterId, {
         id: clusterId,
@@ -552,25 +793,33 @@ export class RoadNetworkSystem {
         const ny = b.gy + dy;
         const { chunk, index } = chunks.getTile(nx, ny);
         const rt = chunk.roadType[index] as RoadType;
-        if (rt !== RoadType.None) {
-          const cluster = this.roadClusterMap.get(`${nx}:${ny}`) ?? 1;
-          const clusterSize = this.clusterStatsMap.get(cluster)?.count ?? 1;
-          const roadDef = ROADS[rt];
-          const tier = rt === RoadType.Bridge ? 2 : rt === RoadType.Rail ? 9 : (roadDef?.tierRank ?? rt);
-          if (rt !== RoadType.Rail) {
-            if (clusterSize > bestClusterSize) {
-              bestClusterSize = clusterSize;
-              bestCluster = cluster;
-            }
-            if (getRoadProperties(rt).heavyTruckFriendly) {
-              heavyTruckSuitable = true;
-            }
-          } else if (bestCluster === 0) {
-            bestCluster = cluster;
-          }
-          if (tier > bestTier) bestTier = tier;
-          accessPoints.push({ gx: nx, gy: ny, roadType: rt, clusterId: cluster, tierRank: tier });
+        if (rt === RoadType.None) continue;
+        // Rail is not road freight access. Counting it here was one of the
+        // sources of the "looks connected but isn't" bug, because a rail tile
+        // would satisfy requiresRoad / minRoadTier without any drivable link.
+        if (rt === RoadType.Rail) continue;
+
+        const key = `${nx}:${ny}`;
+        const cluster = this.roadClusterMap.get(key) ?? 0;
+        if (cluster === 0) continue; // never assume the main network
+        const node = this.graphNodes.get(key);
+        // A road tile with no logical link is a dead stub: a vehicle cannot
+        // enter or leave it, so it is not valid access.
+        const linked = (node?.neighbours.length ?? 0) > 0 || rt === RoadType.Connector;
+        if (!linked) continue;
+
+        const clusterSize = this.clusterStatsMap.get(cluster)?.count ?? 1;
+        const roadDef = ROADS[rt];
+        const tier = rt === RoadType.Bridge ? 2 : (roadDef?.tierRank ?? rt);
+        if (clusterSize > bestClusterSize) {
+          bestClusterSize = clusterSize;
+          bestCluster = cluster;
         }
+        if (getRoadProperties(rt).heavyTruckFriendly) {
+          heavyTruckSuitable = true;
+        }
+        if (tier > bestTier) bestTier = tier;
+        accessPoints.push({ gx: nx, gy: ny, roadType: rt, clusterId: cluster, tierRank: tier });
       }
     }
 
@@ -586,6 +835,31 @@ export class RoadNetworkSystem {
     };
     this.buildingAccessMap.set(b.id, info);
     return info;
+  }
+
+  /**
+   * All logical road nodes belonging to a given cluster. Used by the forestry
+   * fleet to search outward from the road network (road-first) instead of from a
+   * tree centroid, which guarantees the parking spot found is actually drivable.
+   */
+  public getClusterNodes(clusterId: number): RoadGraphNode[] {
+    if (clusterId <= 0) return [];
+    const out: RoadGraphNode[] = [];
+    for (const node of this.graphNodes.values()) {
+      if (node.clusterId === clusterId && node.roadType !== RoadType.Rail) out.push(node);
+    }
+    return out;
+  }
+
+  /** All cluster ids that contain at least `minTiles` drivable road tiles. */
+  public getDrivableClusterIds(): number[] {
+    const out: number[] = [];
+    for (const [id, info] of this.clusterStatsMap.entries()) {
+      if (info.roadClass !== 'road') continue;
+      if (info.count < 2) continue;
+      out.push(id);
+    }
+    return out;
   }
 
   public getCachedRoadAccess(b: BuildingInstance, chunks: ChunkManager): BuildingRoadAccessInfo {
@@ -662,6 +936,13 @@ export class RoadNetworkSystem {
     const avgCongestionPct =
       this.totalRoadTiles > 0 ? Math.min(100, Math.round((sumCong / this.totalRoadTiles) * 100)) : 0;
 
+    let signalizedJunctions = 0;
+    for (const j of this.junctions.values()) {
+      if (j.signalized) signalizedJunctions++;
+    }
+
+    const activeConnectors = this.activeConnectors.filter((c) => c.bridgesOwned && c.bridgesLocked).length;
+
     return {
       totalRoadTiles: this.totalRoadTiles,
       totalRailTiles: this.totalRailTiles,
@@ -673,6 +954,118 @@ export class RoadNetworkSystem {
       congestedTiles,
       activeVehicles,
       avgCongestionPct,
+      junctionCount: this.junctions.size,
+      signalizedJunctions,
+      activeConnectors,
+      danglingEndpoints: this.danglingEndpoints.length,
     };
+  }
+
+  /**
+   * Layer-1 road diagnostics: returns the exact tiles that are logically
+   * unconnected so the UI can explain *why* something reports as disconnected.
+   */
+  public diagnoseRoadNetwork(
+    state: WorldEngineState,
+    chunks: ChunkManager
+  ): Array<{
+    code: 'road_endpoint_unconnected' | 'intersection_missing' | 'connector_unlinked' | 'connector_not_on_border' | 'building_no_road_access' | 'building_road_tier_too_low';
+    gx: number;
+    gy: number;
+    title: string;
+    detail: string;
+    buildingId?: number;
+  }> {
+    const out: Array<{
+      code:
+        | 'road_endpoint_unconnected'
+        | 'intersection_missing'
+        | 'connector_unlinked'
+        | 'connector_not_on_border'
+        | 'building_no_road_access'
+        | 'building_road_tier_too_low';
+      gx: number;
+      gy: number;
+      title: string;
+      detail: string;
+      buildingId?: number;
+    }> = [];
+
+    // Dead-end stubs whose single neighbour is not actually traversable.
+    for (const ep of this.danglingEndpoints) {
+      const node = this.graphNodes.get(`${ep.gx}:${ep.gy}`);
+      if (!node) continue;
+      const isolated = node.neighbours.length === 0;
+      const clusterSize = this.clusterStatsMap.get(node.clusterId)?.count ?? 0;
+      if (isolated) {
+        out.push({
+          code: 'road_endpoint_unconnected',
+          gx: ep.gx,
+          gy: ep.gy,
+          title: 'Road tile has no connected neighbour',
+          detail: `Tile (${ep.gx}, ${ep.gy}) is a lone ${ROADS[ep.roadType]?.name ?? 'road'} tile. Extend the road or remove it.`,
+        });
+      } else if (clusterSize <= 3) {
+        out.push({
+          code: 'road_endpoint_unconnected',
+          gx: ep.gx,
+          gy: ep.gy,
+          title: 'Road stub is not linked to a network',
+          detail: `Tile (${ep.gx}, ${ep.gy}) belongs to a ${clusterSize}-tile fragment that reaches no buildings or suppliers.`,
+        });
+      }
+    }
+
+    for (const c of this.activeConnectors) {
+      const buildingRef = chunks.getTile(c.gx, c.gy);
+      const bId = buildingRef.chunk.buildingRef[buildingRef.index];
+      if (!c.bridgesOwned) {
+        out.push({
+          code: 'connector_unlinked',
+          gx: c.gx,
+          gy: c.gy,
+          title: 'Connector has no owned road',
+          detail: `Connector at (${c.gx}, ${c.gy}) must touch an owned road on this side of the border.`,
+          buildingId: bId >= 0 ? bId : undefined,
+        });
+      } else if (!c.bridgesLocked) {
+        out.push({
+          code: 'connector_unlinked',
+          gx: c.gx,
+          gy: c.gy,
+          title: 'Connector leads to no locked road',
+          detail: `Connector at (${c.gx}, ${c.gy}) reaches locked land, but no locked-area road touches it yet.`,
+          buildingId: bId >= 0 ? bId : undefined,
+        });
+      }
+    }
+
+    for (const b of state.buildings) {
+      if (b.status === 'constructing') continue;
+      const def = BUILDINGS[b.defId];
+      if (!def || !def.requiresRoad) continue;
+      const access = this.getCachedRoadAccess(b, chunks);
+      if (access.accessPoints.length === 0) {
+        out.push({
+          code: 'building_no_road_access',
+          gx: b.gx,
+          gy: b.gy,
+          title: `${def.name} has no road access`,
+          detail: `No drivable road tile touches the footprint of ${def.name} (${b.gx}, ${b.gy}). Build a road on an orthogonally adjacent tile.`,
+          buildingId: b.id,
+        });
+      } else if (def.minRoadTier && access.bestRoadTier < def.minRoadTier) {
+        out.push({
+          code: 'building_road_tier_too_low',
+          gx: b.gx,
+          gy: b.gy,
+          title: `${def.name} needs a higher road tier`,
+          detail: `Adjacent best road tier is ${access.bestRoadTier} but ${def.name} requires tier ${def.minRoadTier}. Upgrade the access road.`,
+          buildingId: b.id,
+        });
+      }
+    }
+
+    return out;
   }
 }
