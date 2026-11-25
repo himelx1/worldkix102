@@ -9,7 +9,25 @@ import type { TechModifiers } from './TechSystem';
 import type { WorkforceSystem } from './WorkforceSystem';
 
 import type { BuildingInstance } from '../core/GameState';
+import { RESOURCES } from '../data/resources.data';
 import { DistrictServiceSystem } from './DistrictServiceSystem';
+
+function formatUtilityReason(prefix: 'Power' | 'Water', reason?: string): string {
+  switch (reason) {
+    case 'not_connected_to_network':
+      return `${prefix}: Not connected to network`;
+    case 'disconnected_section_no_source':
+      return `${prefix}: Disconnected section has no generator/source`;
+    case 'source_inactive':
+      return `${prefix}: Generator/source inactive (missing workers or fuel)`;
+    case 'distribution_overloaded':
+      return `${prefix}: Distribution capacity overloaded`;
+    case 'insufficient_supply':
+      return `${prefix}: Insufficient network supply`;
+    default:
+      return `${prefix}: No ${prefix.toLowerCase()} supply`;
+  }
+}
 
 export interface AdjacencyBonusInfo {
   multiplier: number;
@@ -112,37 +130,80 @@ export class ProductionSystem {
       const def = BUILDINGS[b.defId];
       if (!def) continue;
 
+      const levelMult = getBuildingLevelMultiplier(b.level, def);
+      const outputPerCycle = def.recipe
+        ? Object.values(def.recipe.outputs).reduce((s, v) => s + (v ?? 0), 0)
+        : def.isAutomatedLogging
+          ? Math.max(4, Math.round(6 * levelMult))
+          : 0;
+      const theoreticalHourly = def.recipe
+        ? Number((((1 / Math.max(1, def.recipe.cycleSeconds)) * levelMult) * 60 * outputPerCycle).toFixed(1))
+        : def.isAutomatedLogging
+          ? Number(((def.truckCapacity ?? 6) * 4 * levelMult).toFixed(1))
+          : 0;
+      b.theoreticalHourlyRate = theoreticalHourly;
+      b.realizedOutputTotal ??= 0;
+
       if (!b.enabled) {
         b.status = 'disabled';
+        b.actualHourlyRate = 0;
+        b.productionBottleneck = 'Paused by player';
         continue;
       }
 
       if (def.requiresRoad) {
         const { connectedCluster, bestRoadTier } = roadNet.getCachedRoadAccess(b, chunks);
-        if (connectedCluster === 0 || (def.minRoadTier && bestRoadTier < def.minRoadTier)) {
+        if (connectedCluster === 0) {
+          b.roadReason = 'No adjacent drivable road';
           b.status = 'no_road';
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = 'Road: No adjacent drivable road';
           continue;
         }
+        if (def.minRoadTier && bestRoadTier < def.minRoadTier) {
+          b.roadReason = 'Adjacent road tier too low for heavy freight';
+          b.status = 'no_road';
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = 'Road: Upgrade adjacent road tier';
+          continue;
+        }
+        b.roadReason = 'Connected';
+      } else {
+        b.roadReason = 'Not required';
       }
 
       if (def.maxWorkers > 0 && b.assignedWorkers < def.minWorkers) {
         b.status = 'no_workers';
+        b.actualHourlyRate = 0;
+        b.productionBottleneck = `Workers ${b.assignedWorkers}/${def.minWorkers} min needed`;
         continue;
       }
 
       if (def.powerDemand && (!b.powerConnected || (b.powerSatisfaction ?? 0) <= 0)) {
         b.status = 'no_power';
+        b.actualHourlyRate = 0;
+        b.productionBottleneck = formatUtilityReason('Power', b.powerReason);
         continue;
       }
 
       const needsPipedWater = (def.waterDemand ?? 0) > 0 && (Boolean(def.recipe) || (def.waterDemand ?? 0) >= 2);
       if (needsPipedWater && (!b.waterConnected || (b.waterSatisfaction ?? 0) <= 0)) {
         b.status = 'no_water';
+        b.actualHourlyRate = 0;
+        b.productionBottleneck = formatUtilityReason('Water', b.waterReason);
         continue;
       }
 
       if (!def.recipe) {
         b.status = 'active';
+        if (def.isAutomatedLogging) {
+          const workerRatio = Math.max(0.2, Math.min(1.2, (b.assignedWorkers || 1) / Math.max(1, def.maxWorkers)));
+          b.actualHourlyRate = Number((theoreticalHourly * workerRatio).toFixed(1));
+          b.productionBottleneck = 'Dispatching forestry fleet on connected roads';
+        } else {
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = 'Active';
+        }
         continue;
       }
 
@@ -157,6 +218,8 @@ export class ProductionSystem {
         );
         if (remainingDeposit <= 0) {
           b.status = 'deposit_depleted';
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = 'Local mineral deposit depleted';
           continue;
         }
       }
@@ -164,10 +227,11 @@ export class ProductionSystem {
       const workerEff = workforce.getWorkerEfficiency(b, state, techMods.workerNeedReduction);
       if (workerEff <= 0) {
         b.status = 'no_workers';
+        b.actualHourlyRate = 0;
+        b.productionBottleneck = `Workers ${b.assignedWorkers}/${def.minWorkers} min needed`;
         continue;
       }
 
-      const levelMult = getBuildingLevelMultiplier(b.level, def);
       const roadMult = roadNet.getBuildingLogisticsMultiplier(b, state, chunks);
       const adjBonus = ProductionSystem.getBuildingAdjacencyBonus(b, state, chunks);
       const tileZoneId = chunks.getTileZone(b.gx, b.gy);
@@ -224,8 +288,18 @@ export class ProductionSystem {
       if (b.prodProgress >= 1.0) {
         const hasInputs = ResourceSystem.canAfford(state, 0, def.recipe.inputs);
         if (!hasInputs) {
+          const missingList: string[] = [];
+          for (const [k, v] of Object.entries(def.recipe.inputs)) {
+            if (!v) continue;
+            const have = Math.floor(state.resources[k as ResourceId] ?? 0);
+            if (have < v) {
+              missingList.push(`${RESOURCES[k as ResourceId]?.name ?? k} (${have}/${v})`);
+            }
+          }
           b.status = 'no_inputs';
           b.prodProgress = 0.99;
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = `Missing inputs: ${missingList.join(', ')}`;
           continue;
         }
 
@@ -235,6 +309,8 @@ export class ProductionSystem {
         if (!hasSpace) {
           b.status = 'storage_full';
           b.prodProgress = 0.99;
+          b.actualHourlyRate = 0;
+          b.productionBottleneck = 'Warehouse storage full';
           continue;
         }
 
@@ -251,17 +327,22 @@ export class ProductionSystem {
           if (!depleted) {
             b.status = 'deposit_depleted';
             b.prodProgress = 0.99;
+            b.actualHourlyRate = 0;
+            b.productionBottleneck = 'Local mineral deposit depleted';
             continue;
           }
         }
         ResourceSystem.consume(state, 0, def.recipe.inputs);
+        let cycleOut = 0;
         for (const [k, v] of Object.entries(def.recipe.outputs)) {
           if (v) {
             const rid = k as ResourceId;
-            ResourceSystem.addClamped(state, rid, v);
+            const added = ResourceSystem.addClamped(state, rid, v);
+            cycleOut += added;
             tickDeltas[rid] = (tickDeltas[rid] ?? 0) + v;
           }
         }
+        b.realizedOutputTotal = (b.realizedOutputTotal ?? 0) + cycleOut;
         for (const [k, v] of Object.entries(def.recipe.inputs)) {
           if (v) {
             const rid = k as ResourceId;
@@ -273,6 +354,15 @@ export class ProductionSystem {
         b.status = 'active';
       } else {
         b.status = 'active';
+      }
+
+      b.actualHourlyRate = Number((ratePerSec * 60 * outputPerCycle).toFixed(1));
+      if (powerSat < 1) {
+        b.productionBottleneck = formatUtilityReason('Power', b.powerReason);
+      } else if (waterSat < 1) {
+        b.productionBottleneck = formatUtilityReason('Water', b.waterReason);
+      } else {
+        b.productionBottleneck = 'Operating smoothly';
       }
     }
 

@@ -14,8 +14,8 @@ import { ROADS, RoadType } from '../data/roads.data';
 import { TECH_MAP } from '../data/techTree.data';
 import { DEPOSIT_NAMES, DepositType, FeatureType } from '../data/trees.data';
 import type { ChunkManager } from '../core/ChunkManager';
-import { BuildingInstance, WorldEngineState, ZONE_ID_TO_TYPE } from '../core/GameState';
-import { gridToChunk } from '../core/IsoMath';
+import { BuildingInstance, RoadDirection, WorldEngineState, ZONE_ID_TO_TYPE } from '../core/GameState';
+import { CHUNK_SIZE, gridToChunk } from '../core/IsoMath';
 import { ResourceSystem } from './ResourceSystem';
 import type { RoadNetworkSystem } from './RoadNetworkSystem';
 
@@ -629,7 +629,16 @@ export class BuildingSystem {
     if (existingRoad === roadType) {
       return { ok: false, reason: 'Road already placed here', xpGained: 0 };
     }
-    if (existingRoad !== RoadType.None && roadType !== RoadType.Rail) {
+    if (roadType === RoadType.Connector) {
+      const status = roadNet.evaluateConnectorStatus(gx, gy, chunks);
+      if (!status.connected) {
+        return {
+          ok: false,
+          reason: status.statusText,
+          xpGained: 0,
+        };
+      }
+    } else if (existingRoad !== RoadType.None && roadType !== RoadType.Rail) {
       const prevDef = ROADS[existingRoad];
       const prevRank = prevDef?.tierRank ?? existingRoad;
       const nextRank = def.tierRank ?? roadType;
@@ -657,7 +666,11 @@ export class BuildingSystem {
     ResourceSystem.consume(state, netCoinCost, def.materialCost);
 
     chunk.roadType[index] = roadType;
+    if (!chunk.roadDir) {
+      chunk.roadDir = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+    }
     chunks.markChunkModified(cx, cy);
+    chunks.markRoadNeighborsRenderDirty(gx, gy);
     roadNet.markDirty();
     roadNet.recomputeIfDirty(chunks, state);
     if (existingRoad === RoadType.None) {
@@ -865,7 +878,11 @@ export class BuildingSystem {
     const prevDef = ROADS[existingRoad];
     const refundCoins = Math.round((prevDef?.coinCost ?? 0) * 0.5);
     chunk.roadType[index] = RoadType.None;
+    if (chunk.roadDir) {
+      chunk.roadDir[index] = RoadDirection.TwoWay;
+    }
     chunks.markChunkModified(cx, cy);
+    chunks.markRoadNeighborsRenderDirty(gx, gy);
     roadNet.markDirty();
     roadNet.recomputeIfDirty(chunks, state);
     if (refundCoins > 0) {
@@ -942,7 +959,13 @@ export class BuildingSystem {
     materialCost: Partial<Record<ResourceId, number>>;
   } {
     const def = ROADS[targetRoadType];
-    if (!def || targetRoadType === RoadType.None || targetRoadType === RoadType.Rail || targetRoadType === RoadType.Bridge) {
+    if (
+      !def ||
+      targetRoadType === RoadType.None ||
+      targetRoadType === RoadType.Rail ||
+      targetRoadType === RoadType.Bridge ||
+      targetRoadType === RoadType.Connector
+    ) {
       return { valid: false, reason: 'Select a drivable land road type for network upgrade', tiles: [], totalCoinCost: 0, materialCost: {} };
     }
     if (state.level < def.unlockLevel) {
@@ -954,7 +977,7 @@ export class BuildingSystem {
 
     const startTile = chunks.getTile(startGx, startGy);
     const startRoad = startTile.chunk.roadType[startTile.index] as RoadType;
-    if (startRoad === RoadType.None || startRoad === RoadType.Rail) {
+    if (startRoad === RoadType.None || startRoad === RoadType.Rail || startRoad === RoadType.Connector) {
       return { valid: false, reason: 'Select an existing drivable road tile first', tiles: [], totalCoinCost: 0, materialCost: {} };
     }
 
@@ -972,7 +995,7 @@ export class BuildingSystem {
       const isWater = chunks.isWaterBiome(t.chunk.biomeId[t.index]);
 
       if (rt !== RoadType.None && rt !== RoadType.Rail) {
-        if (rt !== targetRoadType && (!isWater || def.allowedOnWater)) {
+        if (rt !== targetRoadType && rt !== RoadType.Connector && (!isWater || def.allowedOnWater)) {
           const prevDef = ROADS[rt];
           const prevRank = prevDef?.tierRank ?? rt;
           if (targetRank >= prevRank) {
@@ -1035,6 +1058,7 @@ export class BuildingSystem {
       const chunk = chunks.getOrCreateChunk(cx, cy);
       chunk.roadType[index] = targetRoadType;
       chunks.markChunkModified(cx, cy);
+      chunks.markRoadNeighborsRenderDirty(t.gx, t.gy);
     }
     roadNet.markDirty();
     roadNet.recomputeIfDirty(chunks, state);
@@ -1177,6 +1201,7 @@ export class BuildingSystem {
       }
       chunk.roadType[index] = roadType;
       chunks.markChunkModified(cx, cy);
+      chunks.markRoadNeighborsRenderDirty(t.gx, t.gy);
     }
 
     roadNet.markDirty();

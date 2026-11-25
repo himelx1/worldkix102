@@ -1,6 +1,7 @@
 import { BUILDINGS, BuildingCategory, getBuildingFootprint, getBuildingLevelMultiplier } from '../data/buildings.data';
 import { POLICY_MAP } from '../data/policies.data';
 import { RESOURCES, ResourceId } from '../data/resources.data';
+import { RoadType } from '../data/roads.data';
 import { FeatureType, TREE_SPECIES } from '../data/trees.data';
 import { BIOME_NAMES, ChunkManager } from './ChunkManager';
 import type { CommandResult, GameCommand } from './CommandTypes';
@@ -64,6 +65,7 @@ export class CoreEngine {
   public readonly citizens = new CitizenSystem();
   public readonly logistics = new LogisticsAndTransportSystem();
   private drivingViaAdvanceFrame = false;
+  private simClockSec = 0;
 
   private listeners = new Set<(ev: EngineEvent) => void>();
   private tickAccumulatorMs = 0;
@@ -169,6 +171,10 @@ export class CoreEngine {
         employed: 0,
         unemployed: 0,
         homeless: 0,
+        availableWorkforce: 0,
+        totalJobs: 0,
+        occupiedJobs: 0,
+        vacantJobs: 0,
         ageBreakdown: { child: 0, underage: 0, adult: 0, elderly: 0 },
         cohorts: [],
         growthAccumulator: 0,
@@ -189,9 +195,12 @@ export class CoreEngine {
         sustainability: 92,
       },
       powerGenerated: 0,
+      powerDelivered: 0,
       powerDemand: 0,
       waterGenerated: 0,
+      waterDelivered: 0,
       waterDemand: 0,
+      treeRegrowthQueue: [],
       utilitySummary: {
         powerConnectedCount: 0,
         powerDisconnectedCount: 0,
@@ -274,6 +283,13 @@ export class CoreEngine {
     savedState.nextCityId ??= Math.max(...savedState.cities.map((c) => c.id), 1) + 1;
     savedState.zones ??= [];
     savedState.population.homeless ??= 0;
+    savedState.population.availableWorkforce ??= 0;
+    savedState.population.totalJobs ??= 0;
+    savedState.population.occupiedJobs ??= savedState.population.employed ?? 0;
+    savedState.population.vacantJobs ??= 0;
+    savedState.powerDelivered ??= savedState.powerGenerated ?? 0;
+    savedState.waterDelivered ??= savedState.waterGenerated ?? 0;
+    savedState.treeRegrowthQueue ??= [];
     savedState.population.ageBreakdown ??= { child: 0, underage: 0, adult: 0, elderly: 0 };
     savedState.population.cohorts ??= [];
     savedState.settings.crowdDensity ??= 'auto';
@@ -322,6 +338,7 @@ export class CoreEngine {
     CitizenAccounting.reconcileCohorts(this.state);
     this.citizens.reset();
     this.logistics.reset();
+    this.simClockSec = 0;
     this.emit({ type: 'STATE_CHANGED' });
   }
 
@@ -397,6 +414,7 @@ export class CoreEngine {
     this.roadNet.markDirty();
     this.citizens.reset();
     this.logistics.reset();
+    this.simClockSec = 0;
     this.tickAccumulatorMs = 0;
     this.emit({ type: 'STATE_CHANGED' });
   }
@@ -419,6 +437,21 @@ export class CoreEngine {
     return prevTotalMins !== nextTotalMins;
   }
 
+  private collectMovingVehicleTiles(): Set<string> {
+    const occupied = new Set<string>();
+    for (const rv of this.logistics.roadVehicles) {
+      if (rv.state === 'en_route') {
+        occupied.add(`${Math.round(rv.gx)}:${Math.round(rv.gy)}`);
+      }
+    }
+    for (const lt of this.logistics.loggingTrucks) {
+      if (lt.onRoad && (lt.state === 'to_forest' || lt.state === 'to_factory' || lt.state === 'delivering_sawmill')) {
+        occupied.add(`${Math.round(lt.gx)}:${Math.round(lt.gy)}`);
+      }
+    }
+    return occupied;
+  }
+
   public advanceFrame(deltaMs: number): boolean {
     if (this.state.speed === 0) return false;
     const clamped = Math.min(250, Math.max(0, deltaMs));
@@ -432,30 +465,48 @@ export class CoreEngine {
       this.state.weather = 'clear';
     }
 
+    this.simClockSec += simDtSec;
+    this.logistics.update(
+      simDtSec,
+      this.state,
+      this.chunks,
+      this.roadNet,
+      this.simClockSec,
+      (ev) => {
+        this.emit({ type: 'AUTO_DELIVERY', gx: ev.gx, gy: ev.gy, label: ev.label, color: ev.color });
+      },
+      this.forestry
+    );
+    const occupiedVehicles = this.collectMovingVehicleTiles();
+
     // Smooth 60fps autonomous citizen movement & automated tree/resource collection
-    this.citizens.update(simDtSec, this.state, this.chunks, this.forestry, {
-      onChopHit: (gx, gy, outcome) => {
-        if (outcome.cleared) {
-          this.state.xp += outcome.xpGained;
-        }
-        this.emit({
-          type: 'CHOP_HIT',
-          gx,
-          gy,
-          cleared: outcome.cleared,
-          wood: outcome.woodGained,
-          coins: outcome.coinsGained,
-          xp: outcome.xpGained,
-          fromCitizen: true,
-        });
+    this.citizens.update(
+      simDtSec,
+      this.state,
+      this.chunks,
+      this.forestry,
+      {
+        onChopHit: (gx, gy, outcome) => {
+          if (outcome.cleared) {
+            this.state.xp += outcome.xpGained;
+          }
+          this.emit({
+            type: 'CHOP_HIT',
+            gx,
+            gy,
+            cleared: outcome.cleared,
+            wood: outcome.woodGained,
+            coins: outcome.coinsGained,
+            xp: outcome.xpGained,
+            fromCitizen: true,
+          });
+        },
+        onAutoDelivery: (gx, gy, label, color) => {
+          this.emit({ type: 'AUTO_DELIVERY', gx, gy, label, color });
+        },
       },
-      onAutoDelivery: (gx, gy, label, color) => {
-        this.emit({ type: 'AUTO_DELIVERY', gx, gy, label, color });
-      },
-    });
-    this.logistics.update(simDtSec, this.state, this.chunks, (ev) => {
-      this.emit({ type: 'AUTO_DELIVERY', gx: ev.gx, gy: ev.gy, label: ev.label, color: ev.color });
-    });
+      occupiedVehicles
+    );
 
     this.drivingViaAdvanceFrame = true;
     this.tickAccumulatorMs += clamped * this.state.speed;
@@ -479,8 +530,10 @@ export class CoreEngine {
     this.state.stats.playTimeSeconds += 1;
     if (!this.drivingViaAdvanceFrame) {
       this.advanceClock(1);
-      this.citizens.update(1, this.state, this.chunks, this.forestry);
-      this.logistics.update(1, this.state, this.chunks);
+      this.simClockSec += 1;
+      this.logistics.update(1, this.state, this.chunks, this.roadNet, this.simClockSec, undefined, this.forestry);
+      const occupiedVehicles = this.collectMovingVehicleTiles();
+      this.citizens.update(1, this.state, this.chunks, this.forestry, undefined, occupiedVehicles);
     }
     if (this.state.settings.weatherMode === 'always_clear') {
       this.state.weather = 'clear';
@@ -767,6 +820,21 @@ export class CoreEngine {
           this.emit({ type: 'LEVEL_UP', level: lvl, rewardCoins: rew });
         });
         this.emit({ type: 'ROAD_REMOVED', gx: cmd.gx, gy: cmd.gy, refundCoins: res.refundCoins });
+        this.emit({ type: 'STATE_CHANGED' });
+        return { ok: true };
+      }
+
+      case 'SET_ROAD_DIRECTION': {
+        if (!this.chunks.isUnlocked(cmd.gx, cmd.gy)) {
+          return { ok: false, reason: 'Unlock tile first before changing lane direction' };
+        }
+        const ok = this.chunks.setRoadDirection(cmd.gx, cmd.gy, cmd.direction);
+        if (!ok) {
+          return { ok: false, reason: 'No road on this tile' };
+        }
+        this.roadNet.markDirty();
+        this.roadNet.recomputeIfDirty(this.chunks, this.state);
+        this.emit({ type: 'ROAD_PLACED', gx: cmd.gx, gy: cmd.gy });
         this.emit({ type: 'STATE_CHANGED' });
         return { ok: true };
       }
@@ -1486,6 +1554,8 @@ export class CoreEngine {
     const cityName = cityId > 0 ? (this.state.cities.find((c) => c.id === cityId)?.name ?? `City #${cityId}`) : 'Wilderness';
     const zoneType = ZONE_ID_TO_TYPE[chunk.zoneType[index]] ?? 'none';
 
+    const hasRoad = chunk.roadType[index] !== 0;
+
     return {
       gx,
       gy,
@@ -1509,6 +1579,15 @@ export class CoreEngine {
       zoneType,
       utilityNet: chunk.utilityNet[index],
       loggingPermit,
+      roadDirection: hasRoad ? this.chunks.getRoadDirection(gx, gy) : undefined,
+      roadClusterId: hasRoad ? this.roadNet.getRoadClusterId(gx, gy) : 0,
+      roadIntersectionKind: hasRoad ? this.roadNet.getIntersectionKind(gx, gy, this.chunks) : 'none',
+      roadCongestion: hasRoad ? this.roadNet.getTileCongestion(gx, gy) : 0,
+      roadDisconnected: hasRoad ? this.roadNet.isRoadDisconnected(gx, gy) : false,
+      connectorStatus:
+        chunk.roadType[index] === RoadType.Connector
+          ? this.roadNet.evaluateConnectorStatus(gx, gy, this.chunks)
+          : undefined,
     };
   }
 }

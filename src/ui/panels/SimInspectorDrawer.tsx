@@ -20,6 +20,7 @@ const OVERLAYS: Array<{ id: OverlayMode; label: string }> = [
   { id: 'zones', label: 'Zones' },
   { id: 'deposits', label: 'Deposits' },
   { id: 'paths', label: 'Paths' },
+  { id: 'traffic', label: 'Traffic' },
 ];
 
 export const SimInspectorDrawer: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
@@ -40,6 +41,9 @@ export const SimInspectorDrawer: React.FC<{ snap: GameSnapshot }> = ({ snap }) =
   const parsedGy = Number.isFinite(Number(gyInput)) ? Math.trunc(Number(gyInput)) : 0;
   const inspected = GameController.engine.inspectTile(parsedGx, parsedGy);
   const utilSummary = state.utilitySummary;
+  const roadSummary = GameController.engine.roadNet.getNetworkSummary(
+    GameController.engine.logistics.roadVehicles.length
+  );
 
   return (
     <aside className="pointer-events-auto fixed inset-y-0 right-0 z-40 w-full max-w-sm bg-[#091811]/97 border-l border-emerald-700/60 shadow-2xl flex flex-col">
@@ -90,7 +94,7 @@ export const SimInspectorDrawer: React.FC<{ snap: GameSnapshot }> = ({ snap }) =
                 <Map className="w-3.5 h-3.5 text-amber-300" />
                 <span>Map Overlay Mode</span>
               </div>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 {OVERLAYS.map((ov) => (
                   <button
                     key={ov.id}
@@ -105,6 +109,29 @@ export const SimInspectorDrawer: React.FC<{ snap: GameSnapshot }> = ({ snap }) =
                     {ov.label}
                   </button>
                 ))}
+              </div>
+              <div className="p-2 rounded-lg bg-[#07130d] border border-emerald-900/50 text-[11px] space-y-1">
+                <div className="flex items-center justify-between text-stone-200 font-semibold">
+                  <span>Road Network</span>
+                  <span className="text-sky-300">
+                    {roadSummary.totalRoadTiles} tiles · {roadSummary.networkCount}{' '}
+                    {roadSummary.networkCount === 1 ? 'net' : 'nets'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-stone-400">
+                  <span>Vehicles: {roadSummary.activeVehicles}</span>
+                  <span>
+                    Avg Load: {roadSummary.avgCongestionPct}%
+                    {roadSummary.congestedTiles > 0 ? ` (${roadSummary.congestedTiles} busy)` : ''}
+                  </span>
+                </div>
+                {roadSummary.disconnectedClusters > 0 ? (
+                  <div className="text-amber-300 font-medium">
+                    Disconnected: {roadSummary.disconnectedSegments} tiles across{' '}
+                    {roadSummary.disconnectedClusters} isolated{' '}
+                    {roadSummary.disconnectedClusters === 1 ? 'segment' : 'segments'}
+                  </div>
+                ) : null}
               </div>
             </div>
 

@@ -248,19 +248,27 @@ export const TopHud: React.FC<TopHudProps> = ({ snap }) => {
                 </span>
               </>
             ) : null}
-            {state.powerDemand > 0 || state.powerGenerated > 0 ? (
-              <>
-                <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
-                <span
-                  className={`inline-flex items-center gap-1 font-medium shrink-0 ${
-                    state.powerGenerated >= state.powerDemand ? 'text-emerald-300' : 'text-red-400'
-                  }`}
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  {state.powerGenerated}/{state.powerDemand}MW
-                </span>
-              </>
-            ) : null}
+            {state.powerDemand > 0 || state.powerGenerated > 0 ? (() => {
+              const delivered = state.powerDelivered ?? state.powerGenerated;
+              const powerColor =
+                delivered >= state.powerDemand
+                  ? 'text-emerald-300'
+                  : state.powerGenerated >= state.powerDemand
+                    ? 'text-amber-300'
+                    : 'text-red-400';
+              return (
+                <>
+                  <span className="w-px h-3 bg-emerald-900/80 shrink-0" />
+                  <span
+                    title={`Delivered ${delivered} MW / Demand ${state.powerDemand} MW (Total Capacity ${state.powerGenerated} MW)`}
+                    className={`inline-flex items-center gap-1 font-medium shrink-0 ${powerColor}`}
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    {delivered}/{state.powerDemand}MW
+                  </span>
+                </>
+              );
+            })() : null}
           </div>
           <ChevronRight className="w-3.5 h-3.5 text-emerald-500/80 shrink-0" />
         </button>

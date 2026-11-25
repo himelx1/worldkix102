@@ -112,6 +112,28 @@ export const PopulationSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               </div>
             </div>
 
+            {/* Population vs Adult Workforce & Job Slots */}
+            <div className="grid grid-cols-4 gap-2 text-center text-xs tabular-nums">
+              <div className="p-2 rounded-xl bg-[#091c13] border border-emerald-800/55">
+                <div className="text-[10px] text-stone-400">Total Pop</div>
+                <div className="text-sm font-extrabold text-stone-100">{statsSnap.total}</div>
+              </div>
+              <div className="p-2 rounded-xl bg-[#091c13] border border-emerald-800/55">
+                <div className="text-[10px] text-stone-400">Workforce</div>
+                <div className="text-sm font-extrabold text-cyan-300">{statsSnap.availableWorkforce}</div>
+              </div>
+              <div className="p-2 rounded-xl bg-[#091c13] border border-emerald-800/55">
+                <div className="text-[10px] text-stone-400">Employed</div>
+                <div className="text-sm font-extrabold text-emerald-300">{statsSnap.employed}</div>
+              </div>
+              <div className="p-2 rounded-xl bg-[#091c13] border border-emerald-800/55">
+                <div className="text-[10px] text-stone-400">Jobs Filled</div>
+                <div className="text-sm font-extrabold text-amber-300">
+                  {statsSnap.occupiedJobs}/{statsSnap.totalJobs}
+                </div>
+              </div>
+            </div>
+
             {/* Happiness Index & Actionable Improvement Guide */}
             <div className="p-3 rounded-2xl bg-gradient-to-b from-[#132b1f] to-[#0a1a12] border border-emerald-700/55 space-y-2.5 min-w-0">
               <div className="flex items-center justify-between gap-2">
@@ -356,15 +378,27 @@ export const PopulationSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
 
         {subTab === 'professions' && (
           <div className="space-y-3.5 tabular-nums">
-            {/* Employment Summary */}
+            {/* Employment & Job Market Summary */}
             <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
+                <div className="text-[10px] text-stone-400">Adult Workforce</div>
+                <div className="text-base font-bold text-cyan-300">{statsSnap.availableWorkforce}</div>
+              </div>
               <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
                 <div className="text-[10px] text-stone-400">Employed</div>
                 <div className="text-base font-bold text-emerald-300">{statsSnap.employed}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
-                <div className="text-[10px] text-stone-400">Unemployed</div>
+                <div className="text-[10px] text-stone-400">Unemployed Adults</div>
                 <div className="text-base font-bold text-amber-300">{statsSnap.unemployed}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
+                <div className="text-[10px] text-stone-400">Total Jobs</div>
+                <div className="text-base font-bold text-stone-100">{statsSnap.totalJobs}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
+                <div className="text-[10px] text-stone-400">Vacant Jobs</div>
+                <div className="text-base font-bold text-sky-300">{statsSnap.vacantJobs}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-900/50">
                 <div className="text-[10px] text-stone-400">Homeless</div>
@@ -444,7 +478,7 @@ export const PopulationSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               <div className="flex items-center justify-between">
                 <span className="font-bold text-emerald-300">All 16 City District Zones</span>
                 <span className="text-[11px] text-stone-400">
-                  Water: {waterGenerated}/{waterDemand}
+                  Water: {state.waterDelivered ?? waterGenerated}/{waterDemand} (Cap {waterGenerated})
                 </span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">

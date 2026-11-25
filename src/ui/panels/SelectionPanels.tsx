@@ -18,10 +18,10 @@ import {
   Truck,
 } from 'lucide-react';
 import { formatInGameHourlyRate } from '../../core/Formatters';
-import { BiomeId, UtilityFlag, ZONE_META, ZoneType } from '../../core/GameState';
+import { BiomeId, RoadDirection, UtilityFlag, ZONE_META, ZoneType } from '../../core/GameState';
 import { BUILDINGS, getBuildingFootprint, getCorporateLevelTitle } from '../../data/buildings.data';
 import { RESOURCES, ResourceId } from '../../data/resources.data';
-import { ROAD_UPGRADE_TIERS, ROADS, RoadType } from '../../data/roads.data';
+import { getRoadProperties, ROAD_UPGRADE_TIERS, ROADS, RoadType } from '../../data/roads.data';
 import { DEPOSIT_NAMES, DepositType, FeatureType, isTreeFeature, TREE_SPECIES } from '../../data/trees.data';
 import { BuildingSystem } from '../../systems/BuildingSystem';
 import { DistrictServiceSystem } from '../../systems/DistrictServiceSystem';
@@ -136,41 +136,60 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
           <p className="text-xs text-stone-300 leading-relaxed">{def.description}</p>
 
           {/* Automated Logging Center Dedicated Readout & Forest Permit Button */}
-          {def.isAutomatedLogging ? (
-            <div className="p-3 rounded-xl bg-[#091c12] border border-lime-600/50 space-y-2 text-xs tabular-nums">
-              <div className="flex items-center justify-between font-bold text-lime-300">
-                <span className="flex items-center gap-1.5">
-                  <Trees className="w-4 h-4 shrink-0" /> Automated Logging Fleet
-                </span>
-                <span>{def.truckCapacity ?? 10} Trucks</span>
+          {def.isAutomatedLogging ? (() => {
+            const trucks = GameController.engine.logistics.loggingTrucks.filter((t) => t.factoryId === b.id);
+            const drivingCount = trucks.filter((t) => t.state === 'to_forest' || t.state === 'to_factory' || t.state === 'delivering_sawmill').length;
+            const choppingCount = trucks.filter((t) => t.state === 'worker_chopping').length;
+            const blockedTrucks = trucks.filter((t) => t.state === 'blocked');
+            const firstBlockedReason = blockedTrucks[0]?.statusReason;
+            return (
+              <div className="p-3 rounded-xl bg-[#091c12] border border-lime-600/50 space-y-2 text-xs tabular-nums">
+                <div className="flex items-center justify-between font-bold text-lime-300">
+                  <span className="flex items-center gap-1.5">
+                    <Trees className="w-4 h-4 shrink-0" /> Automated Logging Fleet
+                  </span>
+                  <span>{trucks.length}/{def.truckCapacity ?? 10} Trucks</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                  <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Harvested Trees:</span>{' '}
+                    <strong className="text-stone-100">{logStats.harvestedTrees}</strong>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Timber Stock:</span>{' '}
+                    <strong className="text-lime-300">{logStats.factoryTimberStock}</strong>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Daily Output:</span>{' '}
+                    <strong className="text-amber-300">+{logStats.dailyTimberProduction}</strong>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Permitted Tiles:</span>{' '}
+                    <strong className="text-emerald-300">{logStats.permittedForestTiles}</strong>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] px-2 py-1.5 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                  <span className="text-sky-300">Driving: <strong>{drivingCount}</strong></span>
+                  <span className="text-lime-300">Workers Harvesting: <strong>{choppingCount}</strong></span>
+                  <span className={blockedTrucks.length > 0 ? 'text-amber-300' : 'text-stone-400'}>
+                    Blocked: <strong>{blockedTrucks.length}</strong>
+                  </span>
+                </div>
+                {firstBlockedReason ? (
+                  <div className="text-[11px] text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded-lg px-2.5 py-1.5">
+                    {firstBlockedReason}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => GameController.dispatch({ type: 'AUTO_PERMIT_LOGGING_FOREST', buildingId: b.id })}
+                  className="w-full min-h-[42px] px-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs"
+                >
+                  Permit Nearby Forest Land (14-Tile Radius)
+                </button>
               </div>
-              <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-                <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
-                  <span className="text-stone-400">Harvested Trees:</span>{' '}
-                  <strong className="text-stone-100">{logStats.harvestedTrees}</strong>
-                </div>
-                <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
-                  <span className="text-stone-400">Timber Stock:</span>{' '}
-                  <strong className="text-lime-300">{logStats.factoryTimberStock}</strong>
-                </div>
-                <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
-                  <span className="text-stone-400">Daily Output:</span>{' '}
-                  <strong className="text-amber-300">+{logStats.dailyTimberProduction}</strong>
-                </div>
-                <div className="p-2 rounded-lg bg-[#06120c] border border-emerald-900/50">
-                  <span className="text-stone-400">Permitted Tiles:</span>{' '}
-                  <strong className="text-emerald-300">{logStats.permittedForestTiles}</strong>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => GameController.dispatch({ type: 'AUTO_PERMIT_LOGGING_FOREST', buildingId: b.id })}
-                className="w-full min-h-[42px] px-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs"
-              >
-                Permit Nearby Forest Land (14-Tile Radius)
-              </button>
-            </div>
-          ) : null}
+            );
+          })() : null}
 
           {def.truckCapacity || def.storageCapacityBonus || def.exportsSurplus || def.importsUnavailable ? (
             <div className="flex flex-wrap gap-2 text-[11px] text-cyan-200 bg-[#071820] border border-cyan-800/50 rounded-xl px-3 py-1.5 tabular-nums">
@@ -191,32 +210,62 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
             </div>
           ) : null}
 
-          {def.recipe && preview ? (
-            <div className="text-[11px] text-stone-200 bg-[#08150f] border border-emerald-800/60 rounded-xl px-3 py-2 tabular-nums space-y-0.5">
-              <div>
-                Cycle ({def.recipe.cycleSeconds}s):{' '}
-                {Object.keys(def.recipe.inputs).length > 0
-                  ? Object.entries(def.recipe.inputs)
-                      .map(([k, v]) => `${v} ${RESOURCES[k as ResourceId]?.name ?? k}`)
-                      .join(' + ')
-                  : 'Natural Harvest'}{' '}
-                →{' '}
-                {Object.keys(def.recipe.outputs).length > 0
-                  ? Object.entries(def.recipe.outputs)
-                      .map(([k, v]) => `${v} ${RESOURCES[k as ResourceId]?.name ?? k}`)
-                      .join(' + ')
-                  : 'Power Output'}
+          {(def.recipe || def.isAutomatedLogging) && (
+            <div className="text-[11px] text-stone-200 bg-[#08150f] border border-emerald-800/60 rounded-xl px-3 py-2 tabular-nums space-y-1.5">
+              {def.recipe ? (
+                <div>
+                  Cycle ({def.recipe.cycleSeconds}s):{' '}
+                  {Object.keys(def.recipe.inputs).length > 0
+                    ? Object.entries(def.recipe.inputs)
+                        .map(([k, v]) => `${v} ${RESOURCES[k as ResourceId]?.name ?? k}`)
+                        .join(' + ')
+                    : 'Natural Harvest'}{' '}
+                  →{' '}
+                  {Object.keys(def.recipe.outputs).length > 0
+                    ? Object.entries(def.recipe.outputs)
+                        .map(([k, v]) => `${v} ${RESOURCES[k as ResourceId]?.name ?? k}`)
+                        .join(' + ')
+                    : 'Power Output'}
+                </div>
+              ) : null}
+              <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                <div className="p-1.5 rounded-lg bg-[#05100b] border border-emerald-900/50">
+                  <div className="text-stone-400">Capacity/hr</div>
+                  <div className="font-bold text-stone-100">
+                    {formatInGameHourlyRate(b.theoreticalHourlyRate ?? preview?.cur.totalHourlyOutput ?? 0)}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-lg bg-[#05100b] border border-emerald-900/50">
+                  <div className="text-stone-400">Actual/hr</div>
+                  <div className={`font-bold ${(b.actualHourlyRate ?? 0) > 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    {formatInGameHourlyRate(b.actualHourlyRate ?? 0)}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-lg bg-[#05100b] border border-emerald-900/50">
+                  <div className="text-stone-400">Produced</div>
+                  <div className="font-bold text-amber-300">{Math.round(b.realizedOutputTotal ?? 0)}</div>
+                </div>
               </div>
-              {preview.cur.hourlyOutputs.length > 0 ? (
-                <div className="text-amber-300 font-semibold">
-                  Current Rate:{' '}
-                  {preview.cur.hourlyOutputs
-                    .map((o) => `${o.name} ${formatInGameHourlyRate(o.perHour)}`)
-                    .join(' · ')}
+              {def.recipe && Object.keys(def.recipe.inputs).length > 0 ? (
+                <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10px]">
+                  {Object.entries(def.recipe.inputs).map(([k, needRaw]) => {
+                    const need = needRaw ?? 0;
+                    const have = Math.floor(snap.state.resources[k as ResourceId] ?? 0);
+                    return (
+                      <span key={k} className={have >= need ? 'text-emerald-300' : 'text-red-300 font-semibold'}>
+                        {RESOURCES[k as ResourceId]?.name ?? k}: {have}/{need}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {b.productionBottleneck ? (
+                <div className={`text-[10px] font-medium ${b.status === 'active' ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  Status: {b.productionBottleneck}
                 </div>
               ) : null}
             </div>
-          ) : null}
+          )}
 
           {/* Upgrade Preview Box */}
           {canUpgrade && preview?.next ? (
@@ -246,18 +295,50 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
             </div>
           ) : null}
 
-          {def.powerDemand || def.waterDemand ? (
+          {def.powerDemand || def.waterDemand || def.requiresRoad || b.connectedRoadCluster > 0 ? (
             <div className="flex flex-wrap gap-3 text-[11px] tabular-nums px-1">
               {def.powerDemand ? (
-                <span className={b.powerConnected ? 'text-amber-200 font-medium' : 'text-red-300 font-semibold'}>
-                  Power: {b.powerConnected ? `${Math.round((b.powerSatisfaction ?? 1) * 100)}%` : 'Off-Grid'}
+                <span className={b.powerConnected && (b.powerSatisfaction ?? 0) > 0 ? 'text-amber-200 font-medium' : 'text-red-300 font-semibold'}>
+                  Power: {b.powerConnected ? `${Math.round((b.powerSatisfaction ?? 0) * 100)}%` : 'Off-Grid'}
+                  {b.powerReason && b.powerReason !== 'ok' ? ` (${b.powerReason.replace(/_/g, ' ')})` : ''}
                 </span>
               ) : null}
               {def.waterDemand ? (
-                <span className={b.waterConnected ? 'text-sky-200 font-medium' : 'text-red-300 font-semibold'}>
-                  Water: {b.waterConnected ? `${Math.round((b.waterSatisfaction ?? 1) * 100)}%` : 'Off-Grid'}
+                <span className={b.waterConnected && (b.waterSatisfaction ?? 0) > 0 ? 'text-sky-200 font-medium' : 'text-red-300 font-semibold'}>
+                  Water: {b.waterConnected ? `${Math.round((b.waterSatisfaction ?? 0) * 100)}%` : 'Off-Grid'}
+                  {b.waterReason && b.waterReason !== 'ok' ? ` (${b.waterReason.replace(/_/g, ' ')})` : ''}
                 </span>
               ) : null}
+              {(() => {
+                const roadNet = GameController.engine.roadNet;
+                const access = roadNet.getCachedRoadAccess(b, GameController.engine.chunks);
+                const clusterInfo =
+                  access.connectedCluster > 0 ? roadNet.getClusterInfo(access.connectedCluster) : undefined;
+                const needsHeavy =
+                  def.category === 'industrial' ||
+                  def.category === 'production' ||
+                  def.category === 'storage' ||
+                  def.subCategory === 'trade_port' ||
+                  (def.truckCapacity ?? 0) > 0;
+                const congestionPct = Math.round((1 - (b.congestionFactor ?? 1)) * 100);
+                if (access.connectedCluster > 0) {
+                  return (
+                    <>
+                      <span className={clusterInfo?.isDisconnected ? 'text-amber-300 font-semibold' : 'text-emerald-300 font-medium'}>
+                        Road: {clusterInfo?.isDisconnected ? `Isolated Net #${access.connectedCluster}` : `Net #${access.connectedCluster}`}
+                        {congestionPct > 5 ? ` · ${congestionPct}% Traffic` : ''}
+                      </span>
+                      {needsHeavy && !access.heavyTruckSuitable ? (
+                        <span className="text-amber-300 font-semibold">Narrow Road — Truck Bottleneck</span>
+                      ) : null}
+                    </>
+                  );
+                }
+                if (def.requiresRoad) {
+                  return <span className="text-red-300 font-semibold">Road: No Road Access</span>;
+                }
+                return null;
+              })()}
               {(() => {
                 const cov = DistrictServiceSystem.getBuildingCoverage(b, snap.state);
                 const covered =
@@ -570,6 +651,80 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
               </>
             )}
           </div>
+
+          {curRoad ? (
+            <div className="p-3 rounded-xl bg-[#081912] border border-emerald-700/55 space-y-2 text-xs tabular-nums">
+              {curRoad.id === RoadType.Connector && t.connectorStatus ? (
+                <div
+                  className={`p-2 rounded-lg border text-[11px] font-semibold ${
+                    t.connectorStatus.connected
+                      ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-300'
+                      : 'bg-red-950/60 border-red-700/60 text-red-200'
+                  }`}
+                >
+                  {t.connectorStatus.connected
+                    ? 'Connector Linked: Owned Road ↔ Locked Road'
+                    : `Connector Disconnected: ${t.connectorStatus.statusText}`}
+                </div>
+              ) : null}
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-stone-100">
+                  {t.roadDisconnected ? (
+                    <span className="text-amber-300">Disconnected Segment</span>
+                  ) : (
+                    <span className="text-emerald-300">
+                      Connected Network #{t.roadClusterId ?? 1}
+                    </span>
+                  )}
+                </span>
+                <span className="text-[11px] text-stone-300 capitalize">
+                  {(t.roadIntersectionKind ?? 'straight').replace('_', ' ')} ·{' '}
+                  {getRoadProperties(curRoad.id).totalLanes}{' '}
+                  {getRoadProperties(curRoad.id).totalLanes === 1 ? 'Lane' : 'Lanes'} ·{' '}
+                  {Math.round((t.roadCongestion ?? 0) * 100)}% Load
+                </span>
+              </div>
+              {curRoad.id !== RoadType.Rail ? (
+                <div className="space-y-1">
+                  <div className="text-[11px] text-stone-400 font-semibold">Lane Direction</div>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {(
+                      [
+                        [RoadDirection.TwoWay, '2-Way'],
+                        [RoadDirection.OneWayN, '1W N'],
+                        [RoadDirection.OneWayE, '1W E'],
+                        [RoadDirection.OneWayS, '1W S'],
+                        [RoadDirection.OneWayW, '1W W'],
+                      ] as const
+                    ).map(([dir, label]) => {
+                      const active = (t.roadDirection ?? RoadDirection.TwoWay) === dir;
+                      return (
+                        <button
+                          key={dir}
+                          type="button"
+                          onClick={() =>
+                            GameController.dispatch({
+                              type: 'SET_ROAD_DIRECTION',
+                              gx: t.gx,
+                              gy: t.gy,
+                              direction: dir,
+                            })
+                          }
+                          className={`min-h-[36px] rounded-lg text-[11px] font-bold border ${
+                            active
+                              ? 'bg-amber-400 border-amber-300 text-stone-950'
+                              : 'bg-[#06120c] border-emerald-800/70 text-stone-200'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {/* Connected Road Network Bulk Upgrade */}
           {curRoad && curRoad.id !== RoadType.Rail && curRoad.id !== RoadType.Bridge && upgradeChoices.length > 0 ? (

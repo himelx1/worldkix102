@@ -496,6 +496,15 @@ export const BuildMenuSheet: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
                               road.requiredTech ? ` · ${TECH_MAP[road.requiredTech]?.name}` : ''
                             }`}
                       </div>
+                      {road.id === RoadType.Connector ? (
+                        <div className="text-[10px] font-medium text-emerald-300/90 mt-0.5 truncate">
+                          Bridge owned border road ↔ locked forest road
+                        </div>
+                      ) : road.id === RoadType.ThreeLane ? (
+                        <div className="text-[10px] font-medium text-sky-300/90 mt-0.5 truncate">
+                          3-Lane urban road with separated sidewalks
+                        </div>
+                      ) : null}
                       {unlocked && !affordable ? (
                         <div className="text-[10px] font-semibold text-red-300 mt-0.5 truncate">
                           {missingParts.join(' · ')}

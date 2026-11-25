@@ -1,13 +1,19 @@
 import { BUILDINGS, getBuildingFootprint } from '../data/buildings.data';
-import { ROADS, RoadType } from '../data/roads.data';
+import { getRoadProperties, ROADS, RoadType } from '../data/roads.data';
 import type { ChunkManager } from '../core/ChunkManager';
-import { BiomeId, BuildingInstance, TileFlag } from '../core/GameState';
+import { BiomeId, BuildingInstance, RoadDirection, TileFlag, VehicleClass } from '../core/GameState';
+import { RoadNetworkSystem } from './RoadNetworkSystem';
 
 export type TransportMode = 'citizen' | 'vehicle' | 'train';
 
 export interface GridPoint {
   gx: number;
   gy: number;
+}
+
+export interface FindPathOptions {
+  vehicleClass?: VehicleClass;
+  congestionMap?: ReadonlyMap<string, number>;
 }
 
 const DIRS: ReadonlyArray<[number, number]> = [
@@ -21,7 +27,8 @@ const DIRS: ReadonlyArray<[number, number]> = [
  * Strict network-aware movement rules & bounded A* pathfinding:
  * - Citizens walk ONLY on roads, bridges, and unlocked non-mountain dry land.
  *   They NEVER walk on unbridged water, buildings, mountains, or locked tiles.
- * - Vehicles travel strictly on roads & bridges (never off-road, water, or rail).
+ * - Vehicles travel strictly on roads & bridges, obey one-way directions,
+ *   avoid congested bottlenecks, and route heavy trucks away from narrow residential lanes when possible.
  * - Trains travel strictly on RoadType.Rail tiles.
  */
 export class PathfindingSystem {
@@ -32,7 +39,7 @@ export class PathfindingSystem {
     mode: TransportMode = 'citizen'
   ): boolean {
     const { chunk, index } = chunks.getTile(gx, gy);
-    if ((chunk.flags[index] & TileFlag.Unlocked) === 0) return false;
+    const unlocked = (chunk.flags[index] & TileFlag.Unlocked) !== 0;
     if (chunk.buildingRef[index] !== -1) return false;
 
     const road = chunk.roadType[index] as RoadType;
@@ -40,48 +47,148 @@ export class PathfindingSystem {
     const isWater = chunks.isWaterBiome(biome);
 
     if (mode === 'train') {
-      return road === RoadType.Rail;
+      return unlocked && road === RoadType.Rail;
     }
 
     if (mode === 'vehicle') {
+      // Vehicles strictly stay on drivable roads; locked-area roads are reachable ONLY across a Connector edge
       return road !== RoadType.None && road !== RoadType.Rail;
     }
 
+    if (!unlocked) return false;
+
     // Citizen mode:
     if (isWater) {
-      return road === RoadType.Bridge;
+      return road === RoadType.Bridge || road === RoadType.ElevatedHighway || road === RoadType.UndergroundRoad;
     }
     if (biome === BiomeId.Mountain) {
-      // Permanent mountains block foot traffic unless bridged/tunneled via road
       return road !== RoadType.None;
     }
     return true;
   }
 
-  public static getTileStepCost(gx: number, gy: number, chunks: ChunkManager, mode: TransportMode): number {
+  /**
+   * Validates directed edge traversal from (fromGx, fromGy) to (toGx, toGy).
+   * Enforces Connector bridging across owned/locked borders and one-way road directions.
+   */
+  public static isEdgeTraversable(
+    fromGx: number,
+    fromGy: number,
+    toGx: number,
+    toGy: number,
+    chunks: ChunkManager,
+    mode: TransportMode = 'citizen'
+  ): boolean {
+    if (!this.isTilePassable(toGx, toGy, chunks, mode)) return false;
+    if (mode !== 'vehicle') return true;
+
+    const fromTile = chunks.getTile(fromGx, fromGy);
+    const toTile = chunks.getTile(toGx, toGy);
+    const fromUnlocked = (fromTile.chunk.flags[fromTile.index] & TileFlag.Unlocked) !== 0;
+    const toUnlocked = (toTile.chunk.flags[toTile.index] & TileFlag.Unlocked) !== 0;
+    if (fromUnlocked !== toUnlocked) {
+      const fromRoad = fromTile.chunk.roadType[fromTile.index] as RoadType;
+      const toRoad = toTile.chunk.roadType[toTile.index] as RoadType;
+      if (fromRoad !== RoadType.Connector && toRoad !== RoadType.Connector) {
+        return false;
+      }
+    }
+
+    const dx = toGx - fromGx;
+    const dy = toGy - fromGy;
+
+    const fromDir = chunks.getRoadDirection(fromGx, fromGy);
+    if (fromDir !== RoadDirection.TwoWay) {
+      const vec = RoadNetworkSystem.getDirectionVector(fromDir);
+      if (vec && dx === -vec.dx && dy === -vec.dy) {
+        return false;
+      }
+    }
+
+    const toDir = chunks.getRoadDirection(toGx, toGy);
+    if (toDir !== RoadDirection.TwoWay) {
+      const vec = RoadNetworkSystem.getDirectionVector(toDir);
+      if (vec && dx === -vec.dx && dy === -vec.dy) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  public static getTileStepCost(
+    gx: number,
+    gy: number,
+    chunks: ChunkManager,
+    mode: TransportMode,
+    opts?: FindPathOptions
+  ): number {
     const { chunk, index } = chunks.getTile(gx, gy);
     const road = chunk.roadType[index] as RoadType;
-    if (road !== RoadType.None) {
-      const spd = ROADS[road]?.speedMultiplier ?? 1.15;
-      return Math.max(0.35, 1.0 / spd);
+    if (road === RoadType.None) {
+      return mode === 'citizen' ? 1.75 : 999;
     }
-    return mode === 'citizen' ? 1.75 : 999;
+
+    const spd = ROADS[road]?.speedMultiplier ?? 1.15;
+    let cost = Math.max(0.28, 1.0 / spd);
+
+    if (mode === 'vehicle') {
+      const vClass = opts?.vehicleClass ?? 'car';
+      const props = getRoadProperties(road);
+
+      if (vClass === 'heavy_truck') {
+        if (road === RoadType.Dirt) cost *= 2.8;
+        else if (road === RoadType.SmallRoad) cost *= 2.4;
+        else if (road === RoadType.ResidentialRoad) cost *= 2.5;
+        else if (
+          road === RoadType.IndustrialRoad ||
+          road === RoadType.Highway ||
+          road === RoadType.Expressway ||
+          road === RoadType.Interchange
+        ) {
+          cost *= 0.72;
+        } else if (!props.heavyTruckFriendly) {
+          cost *= 1.45;
+        }
+      } else if (vClass === 'bus') {
+        if (road === RoadType.Dirt || road === RoadType.SmallRoad) cost *= 1.8;
+        else if (props.widthClass === 'wide' || road === RoadType.TwoLane || road === RoadType.CommercialBlvd) {
+          cost *= 0.85;
+        }
+      } else if (vClass === 'car') {
+        if (road === RoadType.IndustrialRoad) cost *= 1.25;
+        else if (road === RoadType.ResidentialRoad || road === RoadType.TwoLane || road === RoadType.CommercialBlvd) {
+          cost *= 0.9;
+        }
+      } else if (vClass === 'emergency') {
+        if (props.widthClass === 'highway' || props.widthClass === 'wide') cost *= 0.75;
+      }
+
+      const cong = opts?.congestionMap?.get(`${gx}:${gy}`) ?? 0;
+      if (cong > 0.05) {
+        cost += cong * (vClass === 'emergency' ? 0.55 : 1.75);
+      }
+    }
+
+    return cost;
   }
 
   /**
-   * Returns the best accessible entrance tile adjacent to a building footprint
-   * (preferring connected roads/bridges first, then dry empty land).
+   * Returns all valid entrance tiles adjacent to a building footprint,
+   * sorted with paved/wide road access tiles first.
    */
-  public static findBuildingEntrance(
+  public static findBuildingEntrances(
     b: BuildingInstance,
     chunks: ChunkManager,
     mode: TransportMode = 'citizen'
-  ): GridPoint | null {
+  ): GridPoint[] {
     const def = BUILDINGS[b.defId];
-    if (!def) return null;
+    if (!def) return [];
     const fp = getBuildingFootprint(def, b.rotation ?? 0);
 
-    let fallbackLand: GridPoint | null = null;
+    const roadEntrances: Array<{ gx: number; gy: number; score: number }> = [];
+    const landEntrances: GridPoint[] = [];
+
     for (let dx = -1; dx <= fp.width; dx++) {
       for (let dy = -1; dy <= fp.height; dy++) {
         const isPerimeter =
@@ -94,15 +201,59 @@ export class PathfindingSystem {
         if (!this.isTilePassable(tx, ty, chunks, mode)) continue;
 
         const { chunk, index } = chunks.getTile(tx, ty);
-        if (chunk.roadType[index] !== RoadType.None) {
-          return { gx: tx, gy: ty };
-        }
-        if (!fallbackLand) {
-          fallbackLand = { gx: tx, gy: ty };
+        const rt = chunk.roadType[index] as RoadType;
+        if (rt !== RoadType.None) {
+          const tier = ROADS[rt]?.tierRank ?? rt;
+          roadEntrances.push({ gx: tx, gy: ty, score: tier });
+        } else if (mode === 'citizen') {
+          landEntrances.push({ gx: tx, gy: ty });
         }
       }
     }
-    return fallbackLand;
+
+    roadEntrances.sort((a, c) => c.score - a.score);
+    const out: GridPoint[] = roadEntrances.map((e) => ({ gx: e.gx, gy: e.gy }));
+    for (const l of landEntrances) out.push(l);
+    return out;
+  }
+
+  /**
+   * Returns the best accessible entrance tile adjacent to a building footprint
+   * (preferring highest-tier connected roads/bridges first, then dry empty land).
+   */
+  public static findBuildingEntrance(
+    b: BuildingInstance,
+    chunks: ChunkManager,
+    mode: TransportMode = 'citizen'
+  ): GridPoint | null {
+    const list = this.findBuildingEntrances(b, chunks, mode);
+    return list.length > 0 ? list[0] : null;
+  }
+
+  /**
+   * Finds the closest drivable road tile to a world coordinate within maxRadius.
+   */
+  public static findNearestRoadTile(
+    gx: number,
+    gy: number,
+    chunks: ChunkManager,
+    maxRadius = 6
+  ): GridPoint | null {
+    const cx = Math.round(gx);
+    const cy = Math.round(gy);
+    let best: { gx: number; gy: number; dist: number } | null = null;
+    for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+      for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+        const tx = cx + dx;
+        const ty = cy + dy;
+        if (!this.isTilePassable(tx, ty, chunks, 'vehicle')) continue;
+        const d = Math.hypot(dx, dy);
+        if (!best || d < best.dist) {
+          best = { gx: tx, gy: ty, dist: d };
+        }
+      }
+    }
+    return best ? { gx: best.gx, gy: best.gy } : null;
   }
 
   /**
@@ -116,7 +267,8 @@ export class PathfindingSystem {
     goalGy: number,
     chunks: ChunkManager,
     mode: TransportMode = 'citizen',
-    maxNodes = 420
+    maxNodes = 420,
+    opts?: FindPathOptions
   ): GridPoint[] | null {
     const sx = Math.round(startGx);
     const sy = Math.round(startGy);
@@ -134,10 +286,12 @@ export class PathfindingSystem {
       y: number;
       key: string;
       f: number;
+      pdx: number;
+      pdy: number;
     }
 
     const heap: HeapNode[] = [
-      { x: sx, y: sy, key: startKey, f: Math.abs(gx - sx) + Math.abs(gy - sy) },
+      { x: sx, y: sy, key: startKey, f: Math.abs(gx - sx) + Math.abs(gy - sy), pdx: 0, pdy: 0 },
     ];
     const heapIndex = new Map<string, number>([[startKey, 0]]);
     const gScore = new Map<string, number>([[startKey, 0]]);
@@ -211,9 +365,13 @@ export class PathfindingSystem {
         const ny = cur.y + dy;
         const nKey = `${nx}:${ny}`;
         if (closed.has(nKey)) continue;
-        if (!this.isTilePassable(nx, ny, chunks, mode)) continue;
+        if (!this.isEdgeTraversable(cur.x, cur.y, nx, ny, chunks, mode)) continue;
 
-        const stepCost = this.getTileStepCost(nx, ny, chunks, mode);
+        let stepCost = this.getTileStepCost(nx, ny, chunks, mode, opts);
+        if (mode === 'vehicle' && (cur.pdx !== 0 || cur.pdy !== 0) && (dx !== cur.pdx || dy !== cur.pdy)) {
+          stepCost += 0.14; // Prefer straight arterial corridors over unnecessary zig-zags
+        }
+
         const tentativeG = curG + stepCost;
         if (tentativeG < (gScore.get(nKey) ?? Infinity)) {
           cameFrom.set(nKey, { gx: cur.x, gy: cur.y });
@@ -222,10 +380,12 @@ export class PathfindingSystem {
           const existingIdx = heapIndex.get(nKey);
           if (existingIdx !== undefined) {
             heap[existingIdx].f = f;
+            heap[existingIdx].pdx = dx;
+            heap[existingIdx].pdy = dy;
             siftUp(existingIdx);
           } else {
             const idx = heap.length;
-            heap.push({ x: nx, y: ny, key: nKey, f });
+            heap.push({ x: nx, y: ny, key: nKey, f, pdx: dx, pdy: dy });
             heapIndex.set(nKey, idx);
             siftUp(idx);
           }

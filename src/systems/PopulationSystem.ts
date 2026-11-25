@@ -214,9 +214,7 @@ export class PopulationSystem {
       }
     }
 
-    const waterPolicyCut = state.activePolicies?.includes('eco_water_pact') ? 0.75 : 1.0;
-    state.waterGenerated = waterOut;
-    state.waterDemand = Math.round(Math.max(state.population.total, waterDemand) * waterPolicyCut);
+    void weatherWaterMult;
     state.population.capacity = housingCap;
 
     const pop = state.population.total;
@@ -251,7 +249,12 @@ export class PopulationSystem {
       }
     }
 
-    const waterRatio = pop === 0 ? 1 : Math.min(1, waterOut / Math.max(1, state.waterDemand));
+    const deliveredWater = state.waterDelivered ?? waterOut;
+    const totalWaterNeed = Math.max(state.waterDemand ?? 0, waterDemand);
+    const waterRatio =
+      pop === 0 || totalWaterNeed === 0
+        ? 1
+        : Math.min(1, deliveredWater / Math.max(1, totalWaterNeed));
     const healthRatio = pop === 0 ? 1 : Math.min(1, healthCap / Math.max(10, pop) + medStockBoost);
     const eduRatio = pop === 0 ? 0 : Math.min(1, eduCap / Math.max(15, pop));
     const safetyRatio = pop === 0 ? 1 : Math.min(1, safetyCap / Math.max(15, pop));

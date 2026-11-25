@@ -175,6 +175,44 @@ export type CitizenProfession =
   | 'adult'
   | 'elderly';
 
+export const enum RoadDirection {
+  TwoWay = 0,
+  OneWayN = 1, // dy = -1
+  OneWayE = 2, // dx = +1
+  OneWayS = 3, // dy = +1
+  OneWayW = 4, // dx = -1
+}
+
+export type RoadVehicleKind =
+  | 'car'
+  | 'taxi'
+  | 'bus'
+  | 'delivery_van'
+  | 'fish_van'
+  | 'cargo_truck'
+  | 'container_truck'
+  | 'tractor'
+  | 'construction_truck'
+  | 'emergency';
+
+export type VehicleClass = 'car' | 'van' | 'heavy_truck' | 'bus' | 'emergency';
+
+export type UtilityFailureReason =
+  | 'ok'
+  | 'not_connected_to_network'
+  | 'disconnected_section_no_source'
+  | 'source_inactive'
+  | 'distribution_overloaded'
+  | 'insufficient_supply';
+
+export interface TreeRegrowthEntry {
+  gx: number;
+  gy: number;
+  species: number;
+  saplingAtTick: number;
+  readyAtTick: number;
+}
+
 export interface LoggingTruckAgent {
   id: number;
   factoryId: number;
@@ -182,10 +220,34 @@ export interface LoggingTruckAgent {
   gy: number;
   targetGx: number;
   targetGy: number;
-  state: 'to_forest' | 'chopping' | 'to_factory' | 'delivering_sawmill';
+  state:
+    | 'idle_at_factory'
+    | 'to_forest'
+    | 'worker_chopping'
+    | 'chopping'
+    | 'to_factory'
+    | 'delivering_sawmill'
+    | 'blocked';
   cargoTimber: number;
+  cargoCapacity?: number;
   harvestTimer: number;
   facing: number;
+  route?: Array<{ gx: number; gy: number }>;
+  routeIdx?: number;
+  routeVersion?: number;
+  laneOffset?: number;
+  vx?: number;
+  vy?: number;
+  onRoad?: boolean;
+  stopRoadGx?: number;
+  stopRoadGy?: number;
+  reservedTreeGx?: number;
+  reservedTreeGy?: number;
+  workerGx?: number;
+  workerGy?: number;
+  workerPhase?: 'walking_to_tree' | 'chopping' | 'returning_to_truck';
+  workerFacing?: 1 | -1;
+  statusReason?: string;
 }
 
 export interface TrainAgent {
@@ -202,13 +264,33 @@ export interface TrainAgent {
 
 export interface RoadVehicleAgent {
   id: number;
-  kind: 'bus' | 'taxi' | 'tractor' | 'fish_van';
+  kind: RoadVehicleKind;
+  vehicleClass: VehicleClass;
   gx: number;
   gy: number;
   prevGx: number;
   prevGy: number;
+  nextGx: number;
+  nextGy: number;
   progress: number;
   facing: number;
+  vx: number;
+  vy: number;
+  laneOffset: number;
+  speed: number;
+  maxSpeed: number;
+  state: 'en_route' | 'loading' | 'unloading' | 'waiting_signal' | 'waiting_traffic' | 'idle';
+  waitTimer: number;
+  blockedSec: number;
+  route: Array<{ gx: number; gy: number }>;
+  routeIdx: number;
+  routeVersion: number;
+  sourceBuildingId?: number;
+  destBuildingId?: number;
+  cargoResource?: ResourceId;
+  cargoAmount?: number;
+  returning?: boolean;
+  statusReason?: string;
 }
 
 export interface CorporateSectorStats {
@@ -248,6 +330,8 @@ export interface ChunkData {
   utilityNet: Uint8Array;
   cityRef: Uint16Array;
   zoneType: Uint8Array;
+  // Road lane/one-way direction metadata (0=TwoWay, 1=N, 2=E, 3=S, 4=W)
+  roadDir: Uint8Array;
 }
 
 export type BuildingStatus =
@@ -285,6 +369,13 @@ export interface BuildingInstance {
   waterSatisfaction?: number; // 0..1
   entranceValid?: boolean;
   congestionFactor?: number; // 0.5..1.0
+  theoreticalHourlyRate?: number;
+  actualHourlyRate?: number;
+  realizedOutputTotal?: number;
+  productionBottleneck?: string;
+  powerReason?: UtilityFailureReason;
+  waterReason?: UtilityFailureReason;
+  roadReason?: string;
 }
 
 export interface CityRecord {
@@ -436,6 +527,10 @@ export interface PopulationState {
   employed: number;
   unemployed: number;
   homeless: number;
+  availableWorkforce?: number;
+  totalJobs?: number;
+  occupiedJobs?: number;
+  vacantJobs?: number;
   ageBreakdown: Record<AgeGroup, number>;
   cohorts: CitizenCohort[];
   growthAccumulator: number;
@@ -505,8 +600,10 @@ export interface WorldEngineState {
   population: PopulationState;
   environment: EnvironmentState;
   powerGenerated: number;
+  powerDelivered?: number;
   powerDemand: number;
   waterGenerated: number;
+  waterDelivered?: number;
   waterDemand: number;
   utilitySummary: UtilityNetworkSummary;
   roadConnectedCount: number;
@@ -523,6 +620,7 @@ export interface WorldEngineState {
   landModeActive?: boolean;
   loggingStats?: LoggingOperationStats;
   corporateStats?: CorporateSectorStats[];
+  treeRegrowthQueue?: TreeRegrowthEntry[];
 }
 
 export interface TileInspection {
@@ -548,4 +646,16 @@ export interface TileInspection {
   zoneType: ZoneType;
   utilityNet: number;
   loggingPermit?: boolean;
+  roadDirection?: RoadDirection;
+  roadClusterId?: number;
+  roadIntersectionKind?: string;
+  roadCongestion?: number;
+  roadDisconnected?: boolean;
+  connectorStatus?: {
+    connected: boolean;
+    statusText: string;
+    touchesOwnedRoad: boolean;
+    touchesLockedRoad: boolean;
+    clusterId: number;
+  };
 }

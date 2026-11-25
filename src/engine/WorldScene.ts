@@ -7,6 +7,7 @@ import {
   BiomeId,
   BuildingInstance,
   ChunkData,
+  RoadDirection,
   TileFlag,
   UtilityFlag,
   ZoneId,
@@ -29,7 +30,7 @@ import type { AudioSystem } from './AudioSystem';
 import { CameraInputController } from './CameraInputController';
 import { VfxPool } from './VfxPool';
 
-export type OverlayMode = 'none' | 'power' | 'water' | 'zones' | 'deposits' | 'paths';
+export type OverlayMode = 'none' | 'power' | 'water' | 'zones' | 'deposits' | 'paths' | 'traffic';
 
 export type TerrainBrushKind = 'water' | 'land' | 'unlock' | 'zone' | 'logging_permit' | 'clear_permit';
 
@@ -124,6 +125,8 @@ export class WorldScene extends Phaser.Scene {
 
   private citizenSprites: Phaser.GameObjects.Image[] = [];
   private cargoSprites: Phaser.GameObjects.Image[] = [];
+  private forestryWorkerSprites: Phaser.GameObjects.Image[] = [];
+  private forestryCargoSprites: Phaser.GameObjects.Image[] = [];
   private vehicleSprites: Phaser.GameObjects.Image[] = [];
   private trainSprites: Phaser.GameObjects.Image[] = [];
   private landPriceLabels: Phaser.GameObjects.Text[] = [];
@@ -390,29 +393,46 @@ export class WorldScene extends Phaser.Scene {
       this.waterRippleSprites.push(w);
     }
 
-    // Autonomous Citizen villager + cargo pools (sized for max 64 crowd cap, naturally scaled to fit roads/doors)
+    // Autonomous Citizen villager + cargo pools (sized for max 64 crowd cap, naturally scaled to fit sidewalks/doors)
     for (let i = 0; i < 64; i++) {
       const c = this.add
         .image(0, 0, ATLAS_KEY, 'cit_laborer_0')
         .setOrigin(0.5, 0.9)
-        .setScale(0.44)
+        .setScale(0.33)
         .setVisible(false);
       this.citizenSprites.push(c);
 
       const cg = this.add
         .image(0, 0, ATLAS_KEY, 'cargo_wood')
         .setOrigin(0.5, 0.5)
-        .setScale(0.45)
+        .setScale(0.38)
         .setVisible(false);
       this.cargoSprites.push(cg);
+    }
+
+    // Disembarked forestry worker pool (32)
+    for (let i = 0; i < 32; i++) {
+      const fw = this.add
+        .image(0, 0, ATLAS_KEY, 'cit_forester_0')
+        .setOrigin(0.5, 0.9)
+        .setScale(0.34)
+        .setVisible(false);
+      this.forestryWorkerSprites.push(fw);
+
+      const fc = this.add
+        .image(0, 0, ATLAS_KEY, 'cargo_wood')
+        .setOrigin(0.5, 0.5)
+        .setScale(0.38)
+        .setVisible(false);
+      this.forestryCargoSprites.push(fc);
     }
 
     // Road vehicles & logging trucks pool (60)
     for (let i = 0; i < 60; i++) {
       const v = this.add
-        .image(0, 0, ATLAS_KEY, 'veh_logging_truck')
+        .image(0, 0, ATLAS_KEY, 'veh_logging_truck_empty')
         .setOrigin(0.5, 0.72)
-        .setScale(0.75)
+        .setScale(0.65)
         .setVisible(false);
       this.vehicleSprites.push(v);
     }
@@ -1402,6 +1422,10 @@ export class WorldScene extends Phaser.Scene {
         if (road !== RoadType.None) {
           const mask = this.engine.roadNet.getRoadBitmask(gx, gy, this.engine.chunks);
           rt.stamp(ATLAS_KEY, `road_${road}_${mask}`, localX, localY, { originX: 0.5, originY: 0 });
+          const dir = (chunk.roadDir?.[idx] ?? 0) as RoadDirection;
+          if (dir >= RoadDirection.OneWayN && dir <= RoadDirection.OneWayW) {
+            rt.stamp(ATLAS_KEY, `road_dir_${dir}`, localX, localY + 17, { originX: 0.5, originY: 0.5 });
+          }
         }
       }
     }
@@ -1659,9 +1683,25 @@ export class WorldScene extends Phaser.Scene {
         (this.tool.brush === 'logging_permit' || this.tool.brush === 'clear_permit')) ||
       (this.tool.mode === 'build' && this.tool.defId === 'automated_logging_factory');
 
-    if (this.overlayMode === 'none' && !showZoneLayer && !showLoggingPermits) return;
-
     const bounds = this.getVisibleGridBounds();
+    if (!inLandMode) {
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = this.engine.chunks.getTile(gx, gy);
+          if ((chunk.roadType[index] as RoadType) !== RoadType.Connector) continue;
+          const status = this.engine.roadNet.evaluateConnectorStatus(gx, gy, this.engine.chunks);
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+          const col = status.connected ? 0x22c55e : 0xef4444;
+          gfx.lineStyle(2, col, 0.95);
+          gfx.strokeEllipse(sx, sy + 16, 22, 12);
+          gfx.fillStyle(col, 0.95);
+          gfx.fillCircle(sx, sy + 10, 3.2);
+        }
+      }
+    }
+
+    if (this.overlayMode === 'none' && !showZoneLayer && !showLoggingPermits) return;
     const DEP_COLORS: Record<number, number> = {
       [DepositType.Stone]: 0x94a3b8,
       [DepositType.Clay]: 0xd97706,
@@ -1816,7 +1856,117 @@ export class WorldScene extends Phaser.Scene {
           }
         }
       }
-      if (this.overlayMode !== 'paths') return;
+      if (this.overlayMode !== 'paths' && this.overlayMode !== 'traffic') return;
+    }
+
+    if (this.overlayMode === 'traffic') {
+      const roadNet = this.engine.roadNet;
+      for (let gy = bounds.minGy; gy <= bounds.maxGy; gy++) {
+        for (let gx = bounds.minGx; gx <= bounds.maxGx; gx++) {
+          const { chunk, index } = this.engine.chunks.getTile(gx, gy);
+          const rt = chunk.roadType[index] as RoadType;
+          if (rt === RoadType.None || rt === RoadType.Rail) continue;
+
+          const elev = chunk.elevation[index];
+          const { sx, sy } = gridToIso(gx, gy, elev);
+          const disconnected = roadNet.isRoadDisconnected(gx, gy);
+          const cong = roadNet.getTileCongestion(gx, gy);
+
+          const fillCol = disconnected
+            ? 0xf97316
+            : cong >= 0.6
+              ? 0xef4444
+              : cong >= 0.25
+                ? 0xf59e0b
+                : 0x22c55e;
+          const strokeCol = disconnected ? 0xfef08a : fillCol;
+          const alpha = disconnected ? 0.36 : cong >= 0.25 ? 0.4 : 0.22;
+
+          gfx.fillStyle(fillCol, alpha);
+          gfx.lineStyle(1.4, strokeCol, 0.85);
+          gfx.beginPath();
+          gfx.moveTo(sx, sy + 2);
+          gfx.lineTo(sx + 29, sy + 16);
+          gfx.lineTo(sx, sy + 30);
+          gfx.lineTo(sx - 29, sy + 16);
+          gfx.closePath();
+          gfx.fillPath();
+          gfx.strokePath();
+
+          if (roadNet.hasTrafficSignal(gx, gy, this.engine.chunks)) {
+            const nsSig = roadNet.getSignalState(gx, gy, 0, 1, this.animClockSec);
+            const ewSig = roadNet.getSignalState(gx, gy, 1, 0, this.animClockSec);
+            const sigCol = (s: string) => (s === 'green' ? 0x22c55e : s === 'yellow' ? 0xfacc15 : 0xef4444);
+            gfx.fillStyle(0x0f172a, 0.9);
+            gfx.fillRoundedRect(sx - 9, sy + 11, 18, 8, 3);
+            gfx.fillStyle(sigCol(nsSig), 1);
+            gfx.fillCircle(sx - 4, sy + 15, 2.6);
+            gfx.fillStyle(sigCol(ewSig), 1);
+            gfx.fillCircle(sx + 4, sy + 15, 2.6);
+          }
+        }
+      }
+
+      for (const b of this.engine.state.buildings) {
+        const def = BUILDINGS[b.defId];
+        if (!def) continue;
+        const fp = getBuildingFootprint(def, b.rotation ?? 0);
+        if (
+          b.gx + fp.width < bounds.minGx ||
+          b.gx > bounds.maxGx ||
+          b.gy + fp.height < bounds.minGy ||
+          b.gy > bounds.maxGy
+        ) {
+          continue;
+        }
+        const access = roadNet.getCachedRoadAccess(b, this.engine.chunks);
+        const needsHeavy =
+          def.category === 'industrial' ||
+          def.category === 'storage' ||
+          Boolean(def.isLargeFactory) ||
+          def.subCategory === 'trade_port';
+        const outlineColor =
+          access.accessPoints.length === 0
+            ? def.requiresRoad
+              ? 0xef4444
+              : 0x94a3b8
+            : needsHeavy && !access.heavyTruckSuitable
+              ? 0xf59e0b
+              : 0x22c55e;
+
+        const elev = this.getTileElev(b.gx, b.gy);
+        const top = gridToIso(b.gx, b.gy, elev);
+        const right = gridToIso(b.gx + fp.width, b.gy, elev);
+        const bottom = gridToIso(b.gx + fp.width, b.gy + fp.height, elev);
+        const left = gridToIso(b.gx, b.gy + fp.height, elev);
+        gfx.lineStyle(1.6, outlineColor, 0.85);
+        gfx.beginPath();
+        gfx.moveTo(top.sx, top.sy);
+        gfx.lineTo(right.sx, right.sy);
+        gfx.lineTo(bottom.sx, bottom.sy);
+        gfx.lineTo(left.sx, left.sy);
+        gfx.closePath();
+        gfx.strokePath();
+      }
+
+      for (const rv of this.engine.logistics.roadVehicles) {
+        if (!rv.route || rv.routeIdx >= rv.route.length) continue;
+        const col = rv.vehicleClass === 'emergency' ? 0xf87171 : rv.vehicleClass === 'heavy_truck' ? 0xfbbf24 : 0x38bdf8;
+        gfx.lineStyle(1.5, col, 0.65);
+        const sElev = this.getTileElev(Math.round(rv.gx), Math.round(rv.gy));
+        const sIso = gridToIso(rv.gx, rv.gy, sElev);
+        gfx.beginPath();
+        gfx.moveTo(sIso.sx, sIso.sy + 16);
+        const end = Math.min(rv.route.length, rv.routeIdx + 12);
+        for (let i = rv.routeIdx; i < end; i++) {
+          const wp = rv.route[i];
+          const wElev = this.getTileElev(wp.gx, wp.gy);
+          const wIso = gridToIso(wp.gx, wp.gy, wElev);
+          gfx.lineTo(wIso.sx, wIso.sy + 16);
+        }
+        gfx.strokePath();
+      }
+      return;
     }
 
     if (this.overlayMode === 'paths') {
@@ -1860,12 +2010,39 @@ export class WorldScene extends Phaser.Scene {
       const cs = this.citizenSprites[i];
       const cg = this.cargoSprites[i];
 
-      const { chunk, index } = this.engine.chunks.getTile(Math.round(a.gx), Math.round(a.gy));
+      const tileGx = Math.round(a.gx);
+      const tileGy = Math.round(a.gy);
+      const { chunk, index } = this.engine.chunks.getTile(tileGx, tileGy);
       const elev = chunk.elevation[index];
       const { sx, sy } = gridToIso(a.gx, a.gy, elev);
       const isIdleStill = a.task === 'working' || a.task === 'idle_rest';
-      const bob = isIdleStill ? 0 : Math.abs(Math.sin(a.stridePhase)) * 1.4;
+      const bob = isIdleStill ? 0 : Math.abs(Math.sin(a.stridePhase)) * 1.1;
       const strideIdx = Math.floor(a.stridePhase) % 2;
+
+      // Offset pedestrians laterally onto road sidewalks when walking along drivable roads
+      let sidewalkOx = 0;
+      let sidewalkOy = 0;
+      const rt = chunk.roadType[index] as RoadType;
+      if (rt !== RoadType.None && rt !== RoadType.Rail) {
+        const dx = a.targetGx - a.gx;
+        const dy = a.targetGy - a.gy;
+        let dsx = (dx - dy) * 32;
+        let dsy = (dx + dy) * 16;
+        if (Math.hypot(dsx, dsy) < 1) {
+          const mask = this.engine.roadNet.getRoadBitmask(tileGx, tileGy, this.engine.chunks);
+          if ((mask & 5) !== 0 && (mask & 10) === 0) {
+            dsx = 32;
+            dsy = -16;
+          } else {
+            dsx = 32;
+            dsy = 16;
+          }
+        }
+        const len = Math.hypot(dsx, dsy) || 1;
+        const sideSign = a.id % 2 === 0 ? 1 : -1;
+        sidewalkOx = (-dsy / len) * 9.8 * sideSign;
+        sidewalkOy = (dsx / len) * 9.8 * sideSign;
+      }
 
       const profFrame = `cit_${a.role}_${isIdleStill ? 0 : strideIdx}`;
       let frame = atlasTex?.has(profFrame) ? profFrame : `cit_normal_${isIdleStill ? 0 : strideIdx}`;
@@ -1873,19 +2050,19 @@ export class WorldScene extends Phaser.Scene {
         frame = 'cit_laborer_chop';
       }
 
-      const depth = (Math.round(a.gx) + Math.round(a.gy)) * 100 + elev * 2 + 28;
-      const citScale = a.role === 'child' || a.role === 'teenager' ? 0.37 : 0.44;
+      const depth = (tileGx + tileGy) * 100 + elev * 2 + 28;
+      const citScale = a.role === 'child' || a.role === 'teenager' ? 0.27 : 0.33;
       cs.setFrame(frame)
         .setScale(citScale)
-        .setPosition(sx, sy + 18 - bob)
+        .setPosition(sx + sidewalkOx, sy + 18 - bob + sidewalkOy)
         .setFlipX(a.facing < 0)
         .setDepth(depth)
         .setVisible(true);
 
       if (a.carrying !== 'none') {
         cg.setFrame(`cargo_${a.carrying}`)
-          .setScale(0.45)
-          .setPosition(sx + a.facing * 3, sy + 12 - bob)
+          .setScale(0.38)
+          .setPosition(sx + sidewalkOx + a.facing * 2.5, sy + 12.5 - bob + sidewalkOy)
           .setDepth(depth + 1)
           .setVisible(true);
       } else {
@@ -1902,25 +2079,94 @@ export class WorldScene extends Phaser.Scene {
   private syncVehiclesAndTrains(): void {
     if (this.isInLandMode()) {
       for (const v of this.vehicleSprites) v.setVisible(false);
+      for (const fw of this.forestryWorkerSprites) fw.setVisible(false);
+      for (const fc of this.forestryCargoSprites) fc.setVisible(false);
       for (const t of this.trainSprites) t.setVisible(false);
       return;
     }
 
     const log = this.engine.logistics;
+    const atlasTex = this.textures.get(ATLAS_KEY);
     let vIdx = 0;
+    let fwIdx = 0;
+
+    const getRightLanePixelOffset = (vx: number | undefined, vy: number | undefined, laneOffset: number | undefined): { ox: number; oy: number } => {
+      if (!laneOffset || (!vx && !vy)) return { ox: 0, oy: 0 };
+      const dsx = ((vx ?? 0) - (vy ?? 0)) * 32;
+      const dsy = ((vx ?? 0) + (vy ?? 0)) * 16;
+      const len = Math.hypot(dsx, dsy) || 1;
+      const px = -dsy / len;
+      const py = dsx / len;
+      const distPx = laneOffset * 16;
+      return { ox: px * distPx, oy: py * distPx };
+    };
 
     for (const lt of log.loggingTrucks) {
-      if (vIdx >= this.vehicleSprites.length) break;
-      const { chunk, index } = this.engine.chunks.getTile(Math.round(lt.gx), Math.round(lt.gy));
-      const elev = chunk.elevation[index];
-      const { sx, sy } = gridToIso(lt.gx, lt.gy, elev);
-      this.vehicleSprites[vIdx++]
-        .setFrame('veh_logging_truck')
-        .setPosition(sx, sy + 18)
-        .setFlipX(lt.facing < 0)
-        .setScale(0.75)
-        .setDepth((Math.round(lt.gx) + Math.round(lt.gy)) * 100 + elev * 2 + 29)
-        .setVisible(true);
+      if (vIdx < this.vehicleSprites.length) {
+        const { chunk, index } = this.engine.chunks.getTile(Math.round(lt.gx), Math.round(lt.gy));
+        const elev = chunk.elevation[index];
+        const { sx, sy } = gridToIso(lt.gx, lt.gy, elev);
+        const off = getRightLanePixelOffset(lt.vx, lt.vy, lt.laneOffset);
+        const desiredLogFrame = lt.cargoTimber > 0 ? 'veh_logging_truck_loaded' : 'veh_logging_truck_empty';
+        const logFrame = atlasTex?.has(desiredLogFrame) ? desiredLogFrame : 'veh_logging_truck';
+        this.vehicleSprites[vIdx++]
+          .setFrame(logFrame)
+          .setPosition(sx + off.ox, sy + 18 + off.oy)
+          .setFlipX(lt.facing < 0)
+          .setScale(0.65)
+          .setDepth((Math.round(lt.gx) + Math.round(lt.gy)) * 100 + elev * 2 + 29)
+          .setVisible(true);
+      }
+
+      // Render disembarked forestry worker while truck waits on the road
+      if (
+        lt.state === 'worker_chopping' &&
+        lt.workerGx !== undefined &&
+        lt.workerGy !== undefined &&
+        fwIdx < this.forestryWorkerSprites.length
+      ) {
+        const wGx = Math.round(lt.workerGx);
+        const wGy = Math.round(lt.workerGy);
+        const { chunk, index } = this.engine.chunks.getTile(wGx, wGy);
+        const wElev = chunk.elevation[index];
+        const { sx, sy } = gridToIso(lt.workerGx, lt.workerGy, wElev);
+        const stride = Math.floor(this.animClockSec * 6 + lt.id) % 2;
+        const isChopping = lt.workerPhase === 'chopping';
+        const wFrame =
+          isChopping && Math.sin(this.animClockSec * 9 + lt.id) > 0
+            ? 'cit_laborer_chop'
+            : atlasTex?.has(`cit_forester_${stride}`)
+              ? `cit_forester_${stride}`
+              : `cit_laborer_${stride}`;
+        const bob = isChopping ? 0 : Math.abs(Math.sin(this.animClockSec * 6 + lt.id)) * 1.1;
+        const wDepth = (wGx + wGy) * 100 + wElev * 2 + 28;
+        const facing = lt.workerFacing ?? 1;
+
+        this.forestryWorkerSprites[fwIdx]
+          .setFrame(wFrame)
+          .setPosition(sx, sy + 18 - bob)
+          .setFlipX(facing < 0)
+          .setScale(0.34)
+          .setDepth(wDepth)
+          .setVisible(true);
+
+        if (lt.workerPhase === 'returning_to_truck' && lt.cargoTimber > 0) {
+          this.forestryCargoSprites[fwIdx]
+            .setFrame('cargo_wood')
+            .setPosition(sx + facing * 2.5, sy + 12.5 - bob)
+            .setScale(0.38)
+            .setDepth(wDepth + 1)
+            .setVisible(true);
+        } else {
+          this.forestryCargoSprites[fwIdx].setVisible(false);
+        }
+        fwIdx++;
+      }
+    }
+
+    for (let i = fwIdx; i < this.forestryWorkerSprites.length; i++) {
+      this.forestryWorkerSprites[i].setVisible(false);
+      this.forestryCargoSprites[i].setVisible(false);
     }
 
     for (const rv of log.roadVehicles) {
@@ -1928,11 +2174,22 @@ export class WorldScene extends Phaser.Scene {
       const { chunk, index } = this.engine.chunks.getTile(Math.round(rv.gx), Math.round(rv.gy));
       const elev = chunk.elevation[index];
       const { sx, sy } = gridToIso(rv.gx, rv.gy, elev);
+      const off = getRightLanePixelOffset(rv.vx, rv.vy, rv.laneOffset);
+      const isLoaded = (rv.cargoAmount ?? 0) > 0 && !rv.returning && Boolean(rv.cargoResource);
+      const stateKey = `veh_${rv.kind}_${isLoaded ? 'loaded' : 'empty'}`;
+      const baseKey = `veh_${rv.kind}`;
+      const frame = atlasTex?.has(stateKey) ? stateKey : atlasTex?.has(baseKey) ? baseKey : 'veh_taxi';
+      const scale =
+        rv.kind === 'car' || rv.kind === 'taxi'
+          ? 0.5
+          : rv.kind === 'delivery_van' || rv.kind === 'fish_van' || rv.kind === 'emergency' || rv.kind === 'tractor'
+            ? 0.58
+            : 0.65;
       this.vehicleSprites[vIdx++]
-        .setFrame(`veh_${rv.kind}`)
-        .setPosition(sx, sy + 18)
+        .setFrame(frame)
+        .setPosition(sx + off.ox, sy + 18 + off.oy)
         .setFlipX(rv.facing < 0)
-        .setScale(rv.kind === 'taxi' ? 0.65 : 0.72)
+        .setScale(scale)
         .setDepth((Math.round(rv.gx) + Math.round(rv.gy)) * 100 + elev * 2 + 29)
         .setVisible(true);
     }

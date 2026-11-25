@@ -1,4 +1,5 @@
 import { DepositType, FeatureType, TREE_SPECIES } from '../data/trees.data';
+import { RoadType } from '../data/roads.data';
 import { BiomeId, ChunkData, TileFlag } from './GameState';
 import { CHUNK_SIZE, chunkKey, chunkToGrid, hashCoords, mulberry32 } from './IsoMath';
 
@@ -59,6 +60,7 @@ export class WorldGenerator {
     const utilityNet = new Uint8Array(len);
     const cityRef = new Uint16Array(len);
     const zoneType = new Uint8Array(len);
+    const roadDir = new Uint8Array(len);
 
     for (let ly = 0; ly < CHUNK_SIZE; ly++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {
@@ -283,6 +285,25 @@ export class WorldGenerator {
             depositQty[idx] = depositType[idx] === DepositType.Silver ? 1100 : 800;
           }
         }
+
+        // Procedural forestry dirt trails in locked forest edges (require Connector to access from owned land)
+        const isLockedForestTrail =
+          !WorldGenerator.isStartingTile(gx, gy) &&
+          b !== BiomeId.DeepWater &&
+          b !== BiomeId.River &&
+          b !== BiomeId.Mountain &&
+          depositType[idx] === DepositType.None &&
+          featureType[idx] !== FeatureType.AncientRuin &&
+          featureType[idx] !== FeatureType.StoneOutcrop &&
+          ((gy === 2 && gx >= 5 && gx <= 12) ||
+            (gy === 1 && gx <= -1 && gx >= -8) ||
+            (gx === 2 && gy <= -1 && gy >= -7));
+
+        if (isLockedForestTrail) {
+          roadType[idx] = RoadType.Dirt;
+          featureType[idx] = FeatureType.None;
+          featureHp[idx] = 0;
+        }
       }
     }
 
@@ -306,6 +327,7 @@ export class WorldGenerator {
       utilityNet,
       cityRef,
       zoneType,
+      roadDir,
     };
   }
 }

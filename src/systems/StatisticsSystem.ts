@@ -47,6 +47,10 @@ export interface BuildingOccupancyRow {
 export interface PopulationStatsSnapshot {
   total: number;
   capacity: number;
+  availableWorkforce: number;
+  totalJobs: number;
+  occupiedJobs: number;
+  vacantJobs: number;
   employed: number;
   unemployed: number;
   homeless: number;
@@ -367,9 +371,21 @@ export class StatisticsSystem {
       }))
       .sort((a, b) => b.tiles - a.tiles || b.buildings - a.buildings);
 
+    const adults =
+      state.population.availableWorkforce ??
+      (state.population.ageBreakdown?.adult ??
+        (total > 0 ? Math.max(0, total - Math.floor(total * 0.12) - Math.floor(total * 0.1) - Math.floor(total * 0.1)) : 0));
+    const totalJobs = state.population.totalJobs ?? 0;
+    const occupiedJobs = state.population.occupiedJobs ?? state.population.employed;
+    const vacantJobs = state.population.vacantJobs ?? Math.max(0, totalJobs - occupiedJobs);
+
     return {
       total,
       capacity: state.population.capacity,
+      availableWorkforce: adults,
+      totalJobs,
+      occupiedJobs,
+      vacantJobs,
       employed: state.population.employed,
       unemployed: state.population.unemployed,
       homeless: state.population.homeless ?? 0,

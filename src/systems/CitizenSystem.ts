@@ -105,7 +105,8 @@ export class CitizenSystem {
     state: WorldEngineState,
     chunks: ChunkManager,
     forestry: ForestrySystem,
-    events?: CitizenWorkEvents
+    events?: CitizenWorkEvents,
+    occupiedVehicleTiles?: ReadonlySet<string>
   ): void {
     this.syncTimer += dtSec;
     this.aStarBudgetThisFrame = 6;
@@ -122,7 +123,7 @@ export class CitizenSystem {
     const isNight = state.timeOfDayHours >= 20 || state.timeOfDayHours < 5.5;
 
     for (const agent of this.agents) {
-      this.stepAgent(agent, dtSec, isNight, state, chunks, forestry, events);
+      this.stepAgent(agent, dtSec, isNight, state, chunks, forestry, events, occupiedVehicleTiles);
     }
   }
 
@@ -319,7 +320,8 @@ export class CitizenSystem {
     state: WorldEngineState,
     chunks: ChunkManager,
     forestry: ForestrySystem,
-    events?: CitizenWorkEvents
+    events?: CitizenWorkEvents,
+    occupiedVehicleTiles?: ReadonlySet<string>
   ): void {
     if (agent.path.length > 0) {
       const wp = agent.path[0];
@@ -343,6 +345,17 @@ export class CitizenSystem {
     if (dist > 0.08) {
       const curTile = chunks.getTile(Math.round(agent.gx), Math.round(agent.gy));
       const road = curTile.chunk.roadType[curTile.index] as RoadType;
+      const targetTile = chunks.getTile(Math.round(agent.targetGx), Math.round(agent.targetGy));
+      const targetRoad = targetTile.chunk.roadType[targetTile.index] as RoadType;
+      if (
+        occupiedVehicleTiles &&
+        targetRoad !== RoadType.None &&
+        targetRoad !== RoadType.Rail &&
+        occupiedVehicleTiles.has(`${Math.round(agent.targetGx)}:${Math.round(agent.targetGy)}`)
+      ) {
+        // Yield briefly on sidewalk/curb until vehicle clears the tile
+        return;
+      }
       const roadBoost = road !== RoadType.None ? Math.min(1.85, ROADS[road]?.speedMultiplier ?? 1.1) : 1.0;
       const baseSpeed = agent.carrying !== 'none' ? 1.25 : agent.role === 'child' ? 1.7 : 1.55;
       const step = Math.min(dist, baseSpeed * roadBoost * dtSec);

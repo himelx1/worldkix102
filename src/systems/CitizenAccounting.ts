@@ -46,6 +46,8 @@ export class CitizenAccounting {
       elderly,
     };
 
+    state.population.availableWorkforce = adults;
+
     if (total === 0) {
       state.population.cohorts = [];
       state.population.homeless = 0;
@@ -123,8 +125,10 @@ export class CitizenAccounting {
       });
     }
 
-    // Track per-city workplaces to assign employed cohorts cleanly within city & world bounds
-    let employedBudget = Math.min(total, Math.max(0, state.population.employed));
+    // Track per-city workplaces to assign employed cohorts strictly to working-age adults
+    let employedBudget = Math.min(adults, Math.max(0, state.population.employed));
+    state.population.employed = employedBudget;
+    state.population.unemployed = Math.max(0, adults - employedBudget);
     const workQueue: Array<{ id: number; cityId: number; workerClass: WorkerClass; slots: number }> =
       workplaces.map((w) => ({
         id: w.id,
@@ -224,7 +228,6 @@ export class CitizenAccounting {
         });
       }
 
-      // If any remaining employed budget exists from edge cases where total adults < employed, assign remaining
       if (adultLeft > 0) {
         cohorts.push({
           id: `c_${alloc.cityId}_${alloc.homeId}_unemp`,
@@ -236,40 +239,6 @@ export class CitizenAccounting {
           workplaceOrSchoolId: null,
           count: adultLeft,
         });
-      }
-    }
-
-    // Edge reconciliation if employed > adults (e.g. small settlement <= 10 where workforce assigns every citizen)
-    if (employedBudget > 0) {
-      for (const c of cohorts) {
-        if (employedBudget <= 0) break;
-        if (c.employmentStatus !== 'employed' && c.count > 0) {
-          const convert = Math.min(c.count, employedBudget);
-          if (convert === c.count) {
-            c.employmentStatus = 'employed';
-            const match = workQueue.find((w) => w.slots > 0);
-            if (match) {
-              match.slots -= convert;
-              c.workplaceOrSchoolId = match.id;
-              c.workerClass = match.workerClass;
-            }
-          } else {
-            c.count -= convert;
-            const match = workQueue.find((w) => w.slots > 0);
-            if (match) match.slots -= convert;
-            cohorts.push({
-              id: `${c.id}_emp_adj`,
-              cityId: c.cityId,
-              homeBuildingId: c.homeBuildingId,
-              ageGroup: c.ageGroup,
-              employmentStatus: 'employed',
-              workerClass: match?.workerClass ?? c.workerClass,
-              workplaceOrSchoolId: match?.id ?? null,
-              count: convert,
-            });
-          }
-          employedBudget -= convert;
-        }
       }
     }
 

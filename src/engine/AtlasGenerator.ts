@@ -344,14 +344,33 @@ export function generateWorldAtlas(scene: Phaser.Scene): void {
         drawExtendedCitizenSprite(ctx, alloc(28, 38, `cit_${ep.prof}_1`), ep, 1);
       }
 
-      // Vehicles & Trains (40x28)
-      drawVehicleSprite(ctx, alloc(40, 28, 'veh_logging_truck'), 'logging_truck');
-      drawVehicleSprite(ctx, alloc(40, 28, 'veh_bus'), 'bus');
-      drawVehicleSprite(ctx, alloc(40, 28, 'veh_taxi'), 'taxi');
-      drawVehicleSprite(ctx, alloc(40, 28, 'veh_tractor'), 'tractor');
-      drawVehicleSprite(ctx, alloc(40, 28, 'veh_fish_van'), 'fish_van');
-      drawVehicleSprite(ctx, alloc(44, 30, 'train_passenger'), 'train_passenger');
-      drawVehicleSprite(ctx, alloc(44, 30, 'train_freight'), 'train_freight');
+      // Vehicles & Trains (40x28), with explicit empty vs loaded cargo states
+      const cargoKinds = [
+        'logging_truck',
+        'cargo_truck',
+        'container_truck',
+        'construction_truck',
+        'delivery_van',
+        'fish_van',
+      ] as const;
+      for (const ck of cargoKinds) {
+        drawVehicleSprite(ctx, alloc(40, 28, `veh_${ck}`), ck, 'loaded');
+        drawVehicleSprite(ctx, alloc(40, 28, `veh_${ck}_empty`), ck, 'empty');
+        drawVehicleSprite(ctx, alloc(40, 28, `veh_${ck}_loaded`), ck, 'loaded');
+      }
+      drawVehicleSprite(ctx, alloc(40, 28, 'veh_bus'), 'bus', 'loaded');
+      drawVehicleSprite(ctx, alloc(40, 28, 'veh_taxi'), 'taxi', 'loaded');
+      drawVehicleSprite(ctx, alloc(40, 28, 'veh_tractor'), 'tractor', 'loaded');
+      drawVehicleSprite(ctx, alloc(40, 28, 'veh_car'), 'car', 'loaded');
+      drawVehicleSprite(ctx, alloc(40, 28, 'veh_emergency'), 'emergency', 'loaded');
+      drawVehicleSprite(ctx, alloc(44, 30, 'train_passenger'), 'train_passenger', 'loaded');
+      drawVehicleSprite(ctx, alloc(44, 30, 'train_freight'), 'train_freight', 'loaded');
+
+      // One-way road direction decals (32x20)
+      drawRoadDirectionDecal(ctx, alloc(32, 20, 'road_dir_1'), 1);
+      drawRoadDirectionDecal(ctx, alloc(32, 20, 'road_dir_2'), 2);
+      drawRoadDirectionDecal(ctx, alloc(32, 20, 'road_dir_3'), 3);
+      drawRoadDirectionDecal(ctx, alloc(32, 20, 'road_dir_4'), 4);
 
       drawCargoSprite(ctx, alloc(16, 14, 'cargo_wood'), 'wood');
       drawCargoSprite(ctx, alloc(16, 14, 'cargo_food'), 'food');
@@ -713,6 +732,7 @@ function drawSurveyBorderEdge(
 /**
  * Seamless edge-to-edge bitmask road generator (no boxed tile border!).
  * Bit 1 = N (+16, -8), Bit 2 = E (+16, +8), Bit 4 = S (-16, +8), Bit 8 = W (-16, -8).
+ * Supports smooth curved corners, multi-lane dividers, intersections, dead-end turnarounds, and roundabouts.
  */
 function drawBitmaskRoadTile(
   ctx: CanvasRenderingContext2D,
@@ -730,6 +750,11 @@ function drawBitmaskRoadTile(
     { bit: 4, ex: cx - 16, ey: cy + 8 }, // S edge midpoint
     { bit: 8, ex: cx - 16, ey: cy - 8 }, // W edge midpoint
   ];
+  const activeArms = arms.filter((a) => (mask & a.bit) !== 0);
+  const armCount = activeArms.length;
+  const isCornerCurve = armCount === 2 && mask !== 5 && mask !== 10;
+  const isStraight = armCount === 2 && (mask === 5 || mask === 10);
+  const isJunction = armCount >= 3;
 
   const isHighway =
     road.id === RoadType.Highway ||
@@ -737,37 +762,53 @@ function drawBitmaskRoadTile(
     road.id === RoadType.Expressway ||
     road.id === RoadType.ElevatedHighway ||
     road.id === RoadType.Interchange;
-  const isPaved =
-    road.id === RoadType.Paved ||
-    road.id === RoadType.ResidentialRoad ||
-    road.id === RoadType.TwoLane ||
+  const isConnector = road.id === RoadType.Connector;
+  const isThreeLane = road.id === RoadType.ThreeLane;
+  const isFourOrSixLane =
     road.id === RoadType.FourLane ||
     road.id === RoadType.SixLane ||
     road.id === RoadType.CommercialBlvd ||
-    road.id === RoadType.IndustrialRoad ||
+    isHighway;
+  const isMultiLane =
+    isThreeLane ||
+    isFourOrSixLane ||
+    road.id === RoadType.Paved ||
     road.id === RoadType.UndergroundRoad;
+  const isPaved =
+    isMultiLane ||
+    isConnector ||
+    road.id === RoadType.ResidentialRoad ||
+    road.id === RoadType.TwoLane ||
+    road.id === RoadType.IndustrialRoad;
   const isSmallRoad = road.id === RoadType.SmallRoad;
   const isBridge = road.id === RoadType.Bridge;
   const isRail = road.id === RoadType.Rail;
   const isStone = road.id === RoadType.Stone;
   const isRoundabout = road.id === RoadType.Roundabout;
   const isParking = road.id === RoadType.ParkingLot;
+  const hasSidewalk = isPaved || isSmallRoad || isStone || isRoundabout;
 
   const roadWidth =
     isParking
       ? 18
-      : road.id === RoadType.SixLane || road.id === RoadType.EightLane || road.id === RoadType.Expressway || road.id === RoadType.Interchange
-        ? 17
-        : isHighway
-          ? 15
-          : isPaved || isBridge
-            ? 12
-            : isStone || isSmallRoad
-              ? 11
-              : isRail
-                ? 9
-                : 10;
-  const shoulderWidth = roadWidth + 3;
+      : road.id === RoadType.SixLane ||
+          road.id === RoadType.EightLane ||
+          road.id === RoadType.Expressway ||
+          road.id === RoadType.Interchange
+        ? 18.5
+        : isHighway || road.id === RoadType.FourLane || road.id === RoadType.CommercialBlvd
+          ? 16.5
+          : isThreeLane
+            ? 15
+            : isPaved || isBridge
+              ? 13
+              : isStone || isSmallRoad
+                ? 11
+                : isRail
+                  ? 9
+                  : 10;
+  const sidewalkWidth = hasSidewalk ? roadWidth + 5.2 : roadWidth + 3.0;
+  const curbWidth = hasSidewalk ? roadWidth + 1.6 : roadWidth + 1.8;
 
   // Clip cleanly to the isometric tile diamond so adjoining tiles fuse flush at edges
   ctx.save();
@@ -809,37 +850,74 @@ function drawBitmaskRoadTile(
     return;
   }
 
-  // 1. Shoulder / Curb outer trim
-  ctx.strokeStyle = road.trimColor;
-  ctx.fillStyle = road.trimColor;
-  ctx.lineWidth = shoulderWidth;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, shoulderWidth * 0.55, shoulderWidth * 0.34, 0, 0, Math.PI * 2);
-  ctx.fill();
+  const strokeRoadGeometry = (strokeStyle: string, width: number, fillCapRadiusScale: number) => {
+    ctx.strokeStyle = strokeStyle;
+    ctx.fillStyle = strokeStyle;
+    ctx.lineWidth = width;
 
-  for (const a of arms) {
-    if ((mask & a.bit) === 0) continue;
+    if (armCount === 0) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, width * 0.56, width * 0.34, 0, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+
+    if (armCount === 1) {
+      // Dead-end / cul-de-sac rounded cap
+      const a = activeArms[0];
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, width * 0.62 * fillCapRadiusScale, width * 0.38 * fillCapRadiusScale, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(a.ex, a.ey);
+      ctx.stroke();
+      return;
+    }
+
+    if (isCornerCurve) {
+      const a = activeArms[0];
+      const b = activeArms[1];
+      ctx.beginPath();
+      ctx.moveTo(a.ex, a.ey);
+      ctx.quadraticCurveTo(cx, cy, b.ex, b.ey);
+      ctx.stroke();
+      return;
+    }
+
+    if (isStraight) {
+      const a = activeArms[0];
+      const b = activeArms[1];
+      ctx.beginPath();
+      ctx.moveTo(a.ex, a.ey);
+      ctx.lineTo(b.ex, b.ey);
+      ctx.stroke();
+      return;
+    }
+
+    // Junction hub (3 or 4 ways)
     ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(a.ex, a.ey);
-    ctx.stroke();
+    ctx.ellipse(cx, cy, width * 0.58, width * 0.36, 0, 0, Math.PI * 2);
+    ctx.fill();
+    for (const a of activeArms) {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(a.ex, a.ey);
+      ctx.stroke();
+    }
+  };
+
+  // 1. Pedestrian sidewalk strip (outer) + curb separation line
+  if (hasSidewalk) {
+    const sidewalkCol = isConnector ? '#d97706' : isStone ? '#a8a29e' : '#cbd5e1';
+    strokeRoadGeometry(sidewalkCol, sidewalkWidth, 1.07);
+    strokeRoadGeometry(road.trimColor, curbWidth, 1.02);
+  } else {
+    strokeRoadGeometry(road.trimColor, sidewalkWidth, 1.05);
   }
 
-  // 2. Main roadbed fill
-  ctx.strokeStyle = road.color;
-  ctx.fillStyle = road.color;
-  ctx.lineWidth = roadWidth;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, roadWidth * 0.55, roadWidth * 0.34, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  for (const a of arms) {
-    if ((mask & a.bit) === 0) continue;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(a.ex, a.ey);
-    ctx.stroke();
-  }
+  // 2. Main vehicle carriageway fill
+  strokeRoadGeometry(road.color, roadWidth, 1.0);
 
   // 3. Surface details per road tier
   if (road.id === RoadType.Dirt || road.id === RoadType.Gravel) {
@@ -847,16 +925,14 @@ function drawBitmaskRoadTile(
     ctx.globalAlpha = 0.55;
     ctx.fillRect(cx - 4, cy - 2, 2, 1.5);
     ctx.fillRect(cx + 3, cy + 1, 2.5, 1.5);
-    for (const a of arms) {
-      if ((mask & a.bit) === 0) continue;
+    for (const a of activeArms) {
       ctx.fillRect((cx + a.ex) * 0.5 - 1, (cy + a.ey) * 0.5, 2, 1.5);
     }
     ctx.globalAlpha = 1;
   } else if (isStone) {
     ctx.strokeStyle = 'rgba(255,255,255,0.28)';
     ctx.lineWidth = 1;
-    for (const a of arms) {
-      if ((mask & a.bit) === 0) continue;
+    for (const a of activeArms) {
       const mx = (cx + a.ex) * 0.5;
       const my = (cy + a.ey) * 0.5;
       const nx = -(a.ey - cy) * 0.32;
@@ -881,12 +957,11 @@ function drawBitmaskRoadTile(
         ctx.stroke();
       }
     };
-    for (const a of arms) {
-      if ((mask & a.bit) !== 0) drawPlanks(cx, cy, a.ex, a.ey);
+    for (const a of activeArms) {
+      drawPlanks(cx, cy, a.ex, a.ey);
     }
   } else if (isRail) {
-    for (const a of arms) {
-      if ((mask & a.bit) === 0) continue;
+    for (const a of activeArms) {
       const dx = a.ex - cx;
       const dy = a.ey - cy;
       const len = Math.hypot(dx, dy) || 1;
@@ -923,15 +998,19 @@ function drawBitmaskRoadTile(
     ctx.strokeStyle = '#f8fafc';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
-    ctx.ellipse(cx, cy, 11, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, cy, 11.5, 6.4, 0, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = '#22c55e';
+    ctx.fillStyle = '#16a34a';
     ctx.beginPath();
     ctx.ellipse(cx, cy, 5.5, 3, 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
   } else if (isPaved || isHighway || isSmallRoad) {
-    const lineCol =
-      road.id === RoadType.IndustrialRoad
+    const lineCol = isConnector
+      ? '#34d399'
+      : road.id === RoadType.IndustrialRoad
         ? '#fb923c'
         : road.id === RoadType.CommercialBlvd
           ? '#60a5fa'
@@ -940,20 +1019,120 @@ function drawBitmaskRoadTile(
             : isHighway
               ? '#fde047'
               : '#facc15';
-    ctx.strokeStyle = lineCol;
-    ctx.lineWidth = isHighway ? 1.8 : 1.2;
-    ctx.setLineDash(isHighway ? [] : [3, 3]);
-    for (const a of arms) {
-      if ((mask & a.bit) === 0) continue;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(a.ex, a.ey);
-      ctx.stroke();
+
+    // Helper for parallel lane divider offsets across straight & curved segments
+    const drawOffsetLaneLine = (shiftFrac: number, color: string, width: number, dashed: boolean) => {
+      const shift = roadWidth * shiftFrac;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.setLineDash(dashed ? [2.2, 2.6] : []);
+      if (isCornerCurve) {
+        const a = activeArms[0];
+        const b = activeArms[1];
+        const naX = -(a.ey - cy) * (shiftFrac * 0.52);
+        const naY = (a.ex - cx) * (shiftFrac * 0.52);
+        const nbX = (b.ey - cy) * (shiftFrac * 0.52);
+        const nbY = -(b.ex - cx) * (shiftFrac * 0.52);
+        ctx.beginPath();
+        ctx.moveTo(a.ex + naX, a.ey + naY);
+        ctx.quadraticCurveTo(cx + (naX + nbX) * 0.5, cy + (naY + nbY) * 0.5, b.ex + nbX, b.ey + nbY);
+        ctx.stroke();
+      } else if (isStraight) {
+        const a = activeArms[0];
+        const b = activeArms[1];
+        const dx = b.ex - a.ex;
+        const dy = b.ey - a.ey;
+        const len = Math.hypot(dx, dy) || 1;
+        const px = (-dy / len) * shift;
+        const py = (dx / len) * shift;
+        ctx.beginPath();
+        ctx.moveTo(a.ex + px, a.ey + py);
+        ctx.lineTo(b.ex + px, b.ey + py);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    };
+
+    if (isThreeLane && !isJunction) {
+      // Explicit 3-lane markings: 2 dashed white lane dividers splitting carriageway into 3 lanes
+      drawOffsetLaneLine(-0.17, 'rgba(248, 250, 252, 0.72)', 0.85, true);
+      drawOffsetLaneLine(0.17, 'rgba(248, 250, 252, 0.72)', 0.85, true);
+    } else if (isFourOrSixLane && !isJunction) {
+      // 4-lane & 6-lane outer dashed lane lines
+      drawOffsetLaneLine(-0.24, 'rgba(248, 250, 252, 0.55)', 0.85, true);
+      drawOffsetLaneLine(0.24, 'rgba(248, 250, 252, 0.55)', 0.85, true);
+      if (road.id === RoadType.SixLane || road.id === RoadType.EightLane || road.id === RoadType.Expressway) {
+        drawOffsetLaneLine(-0.12, 'rgba(248, 250, 252, 0.42)', 0.75, true);
+        drawOffsetLaneLine(0.12, 'rgba(248, 250, 252, 0.42)', 0.75, true);
+      }
     }
-    ctx.setLineDash([]);
-    if (road.id === RoadType.ElevatedHighway) {
+
+    // Centerline markings (skipped on 3-lane straight/curve since 3 lanes have 2 dividers instead of center stripe)
+    if (!isThreeLane || isJunction || armCount <= 1) {
+      ctx.strokeStyle = lineCol;
+      ctx.lineWidth = isHighway || isConnector ? 1.7 : 1.2;
+      ctx.setLineDash(isHighway ? [] : [3, 3]);
+      if (isCornerCurve) {
+        const a = activeArms[0];
+        const b = activeArms[1];
+        ctx.beginPath();
+        ctx.moveTo(a.ex, a.ey);
+        ctx.quadraticCurveTo(cx, cy, b.ex, b.ey);
+        ctx.stroke();
+      } else if (isStraight) {
+        const a = activeArms[0];
+        const b = activeArms[1];
+        ctx.beginPath();
+        ctx.moveTo(a.ex, a.ey);
+        ctx.lineTo(b.ex, b.ey);
+        ctx.stroke();
+      } else if (!isJunction) {
+        for (const a of activeArms) {
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(a.ex, a.ey);
+          ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+    }
+
+    // Intersection stop bars & crosswalk stripes for T-junctions & 4-way crosses
+    if (isJunction && isPaved) {
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.78)';
+      ctx.lineWidth = 1.1;
+      for (const a of activeArms) {
+        const sx = cx + (a.ex - cx) * 0.54;
+        const sy = cy + (a.ey - cy) * 0.54;
+        const nx = -(a.ey - cy) * 0.24;
+        const ny = (a.ex - cx) * 0.24;
+        ctx.beginPath();
+        ctx.moveTo(sx - nx, sy - ny);
+        ctx.lineTo(sx + nx, sy + ny);
+        ctx.stroke();
+      }
+    }
+
+    if (isConnector) {
+      // Checkpoint gate bars + emerald/amber border bollards
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(cx - 5, cy - 3.5, 10, 7);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1.3;
+      ctx.strokeRect(cx - 5, cy - 3.5, 10, 7);
+      ctx.fillStyle = '#34d399';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (road.id === RoadType.ElevatedHighway) {
       ctx.fillStyle = '#38bdf8';
       ctx.fillRect(cx - 2, cy - 2, 4, 4);
+    } else if (road.id === RoadType.Interchange) {
+      ctx.strokeStyle = '#fb923c';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 8, 4.5, 0, 0, Math.PI * 2);
+      ctx.stroke();
     } else if (mask === 0) {
       ctx.fillStyle = lineCol;
       ctx.beginPath();
@@ -2902,13 +3081,61 @@ function drawExtendedCitizenSprite(
   }
 }
 
+function drawRoadDirectionDecal(
+  ctx: CanvasRenderingContext2D,
+  pos: { x: number; y: number },
+  dir: 1 | 2 | 3 | 4
+): void {
+  const cx = pos.x + 16;
+  const cy = pos.y + 10;
+  // Isometric unit vectors: N(+16,-8), E(+16,+8), S(-16,+8), W(-16,-8)
+  const vecs: Record<1 | 2 | 3 | 4, [number, number]> = {
+    1: [0.894, -0.447],
+    2: [0.894, 0.447],
+    3: [-0.894, 0.447],
+    4: [-0.894, -0.447],
+  };
+  const [vx, vy] = vecs[dir];
+  const px = -vy;
+  const py = vx;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(248, 250, 252, 0.88)';
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.65)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx + vx * 6.5, cy + vy * 6.5);
+  ctx.lineTo(cx - vx * 2.5 + px * 3.8, cy - vy * 2.5 + py * 3.8);
+  ctx.lineTo(cx - vx * 1.0, cy - vy * 1.0);
+  ctx.lineTo(cx - vx * 2.5 - px * 3.8, cy - vy * 2.5 - py * 3.8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawVehicleSprite(
   ctx: CanvasRenderingContext2D,
   pos: { x: number; y: number },
-  kind: 'logging_truck' | 'bus' | 'taxi' | 'tractor' | 'fish_van' | 'train_passenger' | 'train_freight'
+  kind:
+    | 'logging_truck'
+    | 'bus'
+    | 'taxi'
+    | 'tractor'
+    | 'fish_van'
+    | 'car'
+    | 'delivery_van'
+    | 'cargo_truck'
+    | 'container_truck'
+    | 'construction_truck'
+    | 'emergency'
+    | 'train_passenger'
+    | 'train_freight',
+  loadState: 'empty' | 'loaded' = 'loaded'
 ): void {
   const cx = pos.x + (kind.startsWith('train_') ? 22 : 20);
   const cy = pos.y + (kind.startsWith('train_') ? 17 : 15);
+  const isLoaded = loadState === 'loaded';
 
   ctx.fillStyle = 'rgba(0,0,0,0.34)';
   ctx.beginPath();
@@ -2948,14 +3175,35 @@ function drawVehicleSprite(
   ctx.fill();
 
   if (kind === 'logging_truck') {
+    // Cab
     ctx.fillStyle = '#ea580c';
     ctx.fillRect(cx + 4, cy - 5, 8, 8);
     ctx.fillStyle = '#bae6fd';
     ctx.fillRect(cx + 8, cy - 4, 3, 3);
-    ctx.fillStyle = '#78350f';
-    ctx.fillRect(cx - 11, cy - 4, 14, 7);
-    ctx.fillStyle = '#d97706';
-    ctx.fillRect(cx - 10, cy - 6, 12, 2.5);
+    // Flatbed chassis
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(cx - 12, cy + 1, 16, 2.5);
+    // Vertical timber stakes
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillRect(cx - 11, cy - 5, 1.5, 6);
+    ctx.fillRect(cx - 4, cy - 5, 1.5, 6);
+    ctx.fillRect(cx + 2, cy - 5, 1.5, 6);
+    if (isLoaded) {
+      // Stacked round timber logs on flatbed
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(cx - 11, cy - 4, 14, 5);
+      ctx.fillStyle = '#92400e';
+      ctx.fillRect(cx - 10, cy - 7, 12, 3.5);
+      ctx.fillStyle = '#fbbf24';
+      ctx.beginPath();
+      ctx.arc(cx - 11, cy - 2.5, 1.6, 0, Math.PI * 2);
+      ctx.arc(cx - 10, cy - 5.5, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Empty wooden deck visible between stakes
+      ctx.fillStyle = '#6b4226';
+      ctx.fillRect(cx - 10, cy - 0.5, 13, 1.8);
+    }
   } else if (kind === 'bus') {
     ctx.fillStyle = '#f59e0b';
     ctx.beginPath();
@@ -2972,18 +3220,124 @@ function drawVehicleSprite(
     ctx.fill();
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(cx - 3, cy - 6, 6, 3);
+  } else if (kind === 'car') {
+    ctx.fillStyle = '#3b82f6';
+    ctx.beginPath();
+    ctx.roundRect(cx - 8, cy - 3, 16, 6, 2);
+    ctx.fill();
+    ctx.fillStyle = '#93c5fd';
+    ctx.fillRect(cx - 4, cy - 6, 8, 3);
+  } else if (kind === 'delivery_van') {
+    ctx.fillStyle = '#f8fafc';
+    ctx.beginPath();
+    ctx.roundRect(cx - 10, cy - 6, 20, 9, 2);
+    ctx.fill();
+    ctx.fillStyle = '#22c55e';
+    ctx.fillRect(cx - 8, cy - 3, 10, 2.5);
+    ctx.fillStyle = '#bae6fd';
+    ctx.fillRect(cx + 5, cy - 4, 3.5, 3);
+    if (isLoaded) {
+      // Roof parcel rack & crates when carrying delivery goods
+      ctx.fillStyle = '#b45309';
+      ctx.fillRect(cx - 8, cy - 9, 6, 3);
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(cx - 1, cy - 8, 5, 2);
+    }
+  } else if (kind === 'cargo_truck') {
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(cx + 4, cy - 5, 8, 8);
+    ctx.fillStyle = '#bae6fd';
+    ctx.fillRect(cx + 8, cy - 4, 3, 3);
+    if (isLoaded) {
+      // Full tarped / palletized cargo bed
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillRect(cx - 12, cy - 7, 15, 10);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(cx - 11, cy - 8.5, 6, 2.5);
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillRect(cx - 12, cy - 2, 15, 1.5);
+    } else {
+      // Empty low slatted flatbed
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(cx - 12, cy + 0.5, 15, 2.5);
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.1;
+      ctx.strokeRect(cx - 11.5, cy - 3, 14, 3.5);
+    }
+  } else if (kind === 'container_truck') {
+    ctx.fillStyle = '#1d4ed8';
+    ctx.fillRect(cx + 5, cy - 5, 7, 8);
+    ctx.fillStyle = '#bae6fd';
+    ctx.fillRect(cx + 8, cy - 4, 3, 3);
+    // Flatbed skeletal trailer
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(cx - 13, cy + 1, 17, 2.2);
+    if (isLoaded) {
+      // Full blue corrugated intermodal shipping container
+      ctx.fillStyle = '#0ea5e9';
+      ctx.fillRect(cx - 13, cy - 7, 17, 8.5);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(cx - 11, cy - 5, 13, 2);
+    } else {
+      // Empty twist-lock chassis pins only
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(cx - 13, cy - 0.5, 2, 1.5);
+      ctx.fillRect(cx + 2, cy - 0.5, 2, 1.5);
+    }
+  } else if (kind === 'construction_truck') {
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(cx + 4, cy - 5, 8, 8);
+    ctx.fillStyle = '#bae6fd';
+    ctx.fillRect(cx + 8, cy - 4, 3, 3);
+    if (isLoaded) {
+      // Heaped gravel/stone mound rising from dump bed
+      ctx.fillStyle = '#94a3b8';
+      ctx.beginPath();
+      ctx.arc(cx - 4, cy - 6, 6, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#cbd5e1';
+      ctx.beginPath();
+      ctx.arc(cx - 5, cy - 7, 3.5, Math.PI, 0);
+      ctx.fill();
+    }
+    ctx.fillStyle = isLoaded ? '#d97706' : '#92400e';
+    ctx.beginPath();
+    ctx.moveTo(cx - 12, cy - 5);
+    ctx.lineTo(cx + 3, cy - 5);
+    ctx.lineTo(cx + 3, cy + 3);
+    ctx.lineTo(cx - 10, cy + 3);
+    ctx.closePath();
+    ctx.fill();
+  } else if (kind === 'emergency') {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(cx - 9, cy - 5, 18, 8, 2);
+    ctx.fill();
+    ctx.fillStyle = '#ef4444';
+    ctx.fillRect(cx - 9, cy - 1, 18, 2);
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(cx - 2, cy - 7, 3, 2);
+    ctx.fillStyle = '#ef4444';
+    ctx.fillRect(cx + 1, cy - 7, 3, 2);
   } else if (kind === 'tractor') {
     ctx.fillStyle = '#16a34a';
     ctx.fillRect(cx - 7, cy - 5, 13, 7);
     ctx.fillStyle = '#facc15';
     ctx.fillRect(cx - 2, cy - 9, 6, 4);
   } else {
+    // fish_van
     ctx.fillStyle = '#0284c7';
     ctx.beginPath();
     ctx.roundRect(cx - 10, cy - 6, 20, 9, 2);
     ctx.fill();
     ctx.fillStyle = '#f8fafc';
     ctx.fillRect(cx - 7, cy - 4, 9, 4);
+    if (isLoaded) {
+      ctx.fillStyle = '#e0f2fe';
+      ctx.fillRect(cx - 8, cy - 8.5, 7, 2.5);
+      ctx.fillStyle = '#fb923c';
+      ctx.fillRect(cx - 7, cy - 8, 3, 1.5);
+    }
   }
 }
 

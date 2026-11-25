@@ -1,5 +1,5 @@
 import { DepositType, FeatureType, isTreeFeature } from '../data/trees.data';
-import { BiomeId, ChunkData, TileFlag, UtilityFlag, ZoneId } from './GameState';
+import { BiomeId, ChunkData, RoadDirection, TileFlag, UtilityFlag, ZoneId } from './GameState';
 import { CHUNK_SIZE, chunkKey, gridToChunk } from './IsoMath';
 import { WorldGenerator } from './WorldGenerator';
 
@@ -101,6 +101,15 @@ export class ChunkManager {
 
   public markRenderDirty(cx: number, cy: number): void {
     this.dirtyRenderKeys.add(chunkKey(cx, cy));
+  }
+
+  public markRoadNeighborsRenderDirty(gx: number, gy: number): void {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const n = gridToChunk(gx + dx, gy + dy);
+        this.dirtyRenderKeys.add(chunkKey(n.cx, n.cy));
+      }
+    }
   }
 
   public consumeDirtyRenderKeys(): string[] {
@@ -337,6 +346,24 @@ export class ChunkManager {
       chunk.utilityNet[index] &= ~flag;
     }
     this.markChunkModified(cx, cy);
+    return true;
+  }
+
+  public getRoadDirection(gx: number, gy: number): RoadDirection {
+    const { chunk, index } = this.getTile(gx, gy);
+    return (chunk.roadDir?.[index] ?? RoadDirection.TwoWay) as RoadDirection;
+  }
+
+  public setRoadDirection(gx: number, gy: number, dir: RoadDirection): boolean {
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = this.getOrCreateChunk(cx, cy);
+    if (!chunk.roadDir) {
+      chunk.roadDir = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+    }
+    if (chunk.roadType[index] === 0) return false;
+    chunk.roadDir[index] = dir;
+    this.markChunkModified(cx, cy);
+    this.markRoadNeighborsRenderDirty(gx, gy);
     return true;
   }
 

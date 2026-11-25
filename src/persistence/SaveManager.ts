@@ -48,6 +48,10 @@ export const CHUNK_V2_BYTES =
   512 + // cityRef (u16)
   256; // zoneType (u8) === 5376 bytes
 
+export const CHUNK_V3_ROAD_BYTES =
+  CHUNK_V2_BYTES +
+  256; // roadDir (u8) === 5632 bytes
+
 export function computeCRC32(str: string): number {
   let c = 0xffffffff;
   for (let i = 0; i < str.length; i++) {
@@ -60,7 +64,7 @@ export function computeCRC32(str: string): number {
 }
 
 export function serializeChunk(c: ChunkData): ArrayBuffer {
-  const buf = new ArrayBuffer(CHUNK_V2_BYTES);
+  const buf = new ArrayBuffer(CHUNK_V3_ROAD_BYTES);
   const u8 = new Uint8Array(buf);
   let off = 0;
   const copyU8 = (arr: Uint8Array) => {
@@ -86,6 +90,7 @@ export function serializeChunk(c: ChunkData): ArrayBuffer {
   copyU8(c.utilityNet);
   copyView(c.cityRef);
   copyU8(c.zoneType);
+  copyU8(c.roadDir ?? new Uint8Array(CHUNK_SIZE * CHUNK_SIZE));
   return buf;
 }
 
@@ -150,6 +155,7 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
   let utilityNet: Uint8Array;
   let cityRef: Uint16Array;
   let zoneType: Uint8Array;
+  let roadDir: Uint8Array;
 
   if (bytes.byteLength >= CHUNK_V2_BYTES) {
     utilityNet = takeU8();
@@ -165,6 +171,12 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
         cityRef[i] = 1;
       }
     }
+  }
+
+  if (bytes.byteLength >= CHUNK_V3_ROAD_BYTES) {
+    roadDir = takeU8();
+  } else {
+    roadDir = new Uint8Array(len);
   }
 
   return {
@@ -187,6 +199,7 @@ export function deserializeChunk(cx: number, cy: number, bytes: ArrayBuffer): Ch
     utilityNet,
     cityRef,
     zoneType,
+    roadDir,
   };
 }
 

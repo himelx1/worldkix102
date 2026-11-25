@@ -16,6 +16,32 @@ export interface ChopOutcome {
 }
 
 export class ForestrySystem {
+  public scheduleTreeRegrowth(
+    gx: number,
+    gy: number,
+    ft: FeatureType,
+    state: WorldEngineState
+  ): void {
+    const species = TREE_SPECIES[ft];
+    if (!species || species.woodYield <= 0 || ft === FeatureType.Sapling) return;
+    if (ft === FeatureType.StoneOutcrop || ft === FeatureType.AncientRuin) return;
+
+    state.treeRegrowthQueue ??= [];
+    const existingIdx = state.treeRegrowthQueue.findIndex((e) => e.gx === gx && e.gy === gy);
+    const entry = {
+      gx,
+      gy,
+      species: ft,
+      saplingAtTick: state.tick + 12,
+      readyAtTick: state.tick + 48,
+    };
+    if (existingIdx >= 0) {
+      state.treeRegrowthQueue[existingIdx] = entry;
+    } else {
+      state.treeRegrowthQueue.push(entry);
+    }
+  }
+
   public chopTile(
     gx: number,
     gy: number,
@@ -50,6 +76,7 @@ export class ForestrySystem {
     // Tree or boulder cleared!
     chunk.featureType[index] = FeatureType.None;
     chunk.featureHp[index] = 0;
+    this.scheduleTreeRegrowth(gx, gy, ft, state);
 
     let woodGained = 0;
     const timberBoost = state.activePolicies?.includes('timber_stewards') ? 1.35 : 1.0;
@@ -149,11 +176,54 @@ export class ForestrySystem {
     if (state.activePolicies?.includes('timber_stewards')) policyBoost *= 1.5;
     if (state.activePolicies?.includes('green_charter')) policyBoost *= 2.0;
 
-    // Mature saplings and allow Forester Huts to replant nearby empty forest tiles
+    // Process scheduled tree regrowth in BOTH unlocked and locked areas (persists across save/load)
+    if (state.treeRegrowthQueue && state.treeRegrowthQueue.length > 0) {
+      const accel = Math.max(0, Math.floor((springBoost * policyBoost - 1) * 2));
+      for (let i = state.treeRegrowthQueue.length - 1; i >= 0; i--) {
+        const entry = state.treeRegrowthQueue[i];
+        const { cx, cy, index } = gridToChunk(entry.gx, entry.gy);
+        const chunk = chunks.getOrCreateChunk(cx, cy);
+        const biome = chunk.biomeId[index] as BiomeId;
+        if (
+          chunks.isWaterBiome(biome) ||
+          biome === BiomeId.Desert ||
+          biome === BiomeId.Mountain ||
+          chunk.buildingRef[index] !== -1 ||
+          chunk.roadType[index] !== 0
+        ) {
+          state.treeRegrowthQueue.splice(i, 1);
+          continue;
+        }
+
+        if (accel > 0) {
+          entry.readyAtTick = Math.max(entry.saplingAtTick + 10, entry.readyAtTick - accel);
+        }
+
+        const curFt = chunk.featureType[index] as FeatureType;
+        if (state.tick >= entry.readyAtTick) {
+          if (curFt === FeatureType.None || curFt === FeatureType.Sapling) {
+            const speciesId = (TREE_SPECIES[entry.species as FeatureType]
+              ? entry.species
+              : FeatureType.JungleHardwood) as FeatureType;
+            chunk.featureType[index] = speciesId;
+            chunk.featureHp[index] = TREE_SPECIES[speciesId]?.maxHp ?? 40;
+            chunks.markChunkModified(cx, cy);
+          }
+          state.treeRegrowthQueue.splice(i, 1);
+        } else if (state.tick >= entry.saplingAtTick && curFt === FeatureType.None) {
+          chunk.featureType[index] = FeatureType.Sapling;
+          chunk.featureHp[index] = 15;
+          chunks.markChunkModified(cx, cy);
+        }
+      }
+    }
+
+    // Mature saplings (locked or unlocked) into adult trees cleanly
     for (const chunk of chunks.getAllLoadedChunks()) {
-      if (!chunk.isModified) continue;
       for (let i = 0; i < CHUNK_SIZE * CHUNK_SIZE; i++) {
         if (chunk.featureType[i] === FeatureType.Sapling) {
+          const { gx, gy } = chunkToGrid(chunk.cx, chunk.cy, i % CHUNK_SIZE, Math.floor(i / CHUNK_SIZE));
+          if (state.treeRegrowthQueue?.some((e) => e.gx === gx && e.gy === gy)) continue;
           const growChance = 0.08 * springBoost * policyBoost;
           if (((state.tick + i * 17) % 100) / 100 < growChance) {
             chunk.featureType[i] = FeatureType.JungleHardwood;

@@ -23,6 +23,8 @@ export const enum RoadType {
   Interchange = 19,
   Roundabout = 20,
   ParkingLot = 21,
+  ThreeLane = 22,
+  Connector = 23,
 }
 
 export interface RoadDef {
@@ -35,6 +37,7 @@ export interface RoadDef {
   materialCost: Partial<Record<ResourceId, number>>;
   speedMultiplier: number;
   tierRank?: number;
+  isConnector?: boolean;
   allowedOnWater: boolean;
   color: string;
   trimColor: string;
@@ -356,6 +359,35 @@ export const ROADS: Record<RoadType, RoadDef> = {
     trimColor: '#60a5fa',
     xpYield: 5,
   },
+  [RoadType.ThreeLane]: {
+    id: RoadType.ThreeLane,
+    key: 'three_lane',
+    name: 'Three-Lane Road',
+    unlockLevel: 5,
+    coinCost: 38,
+    materialCost: { stone: 2 },
+    speedMultiplier: 1.72,
+    tierRank: 5,
+    allowedOnWater: false,
+    color: '#3b4754',
+    trimColor: '#e2e8f0',
+    xpYield: 9,
+  },
+  [RoadType.Connector]: {
+    id: RoadType.Connector,
+    key: 'connector',
+    name: 'Road Connector',
+    unlockLevel: 1,
+    coinCost: 25,
+    materialCost: { wood: 2 },
+    speedMultiplier: 1.4,
+    tierRank: 4,
+    isConnector: true,
+    allowedOnWater: false,
+    color: '#334155',
+    trimColor: '#f59e0b',
+    xpYield: 10,
+  },
 };
 
 export const BUILDABLE_ROADS: RoadDef[] = [
@@ -365,7 +397,9 @@ export const BUILDABLE_ROADS: RoadDef[] = [
   ROADS[RoadType.ResidentialRoad],
   ROADS[RoadType.Stone],
   ROADS[RoadType.TwoLane],
+  ROADS[RoadType.ThreeLane],
   ROADS[RoadType.IndustrialRoad],
+  ROADS[RoadType.Connector],
   ROADS[RoadType.Roundabout],
   ROADS[RoadType.ParkingLot],
   ROADS[RoadType.Paved],
@@ -383,5 +417,57 @@ export const BUILDABLE_ROADS: RoadDef[] = [
 ];
 
 export const ROAD_UPGRADE_TIERS: RoadDef[] = BUILDABLE_ROADS.filter(
-  (r) => !r.allowedOnWater && r.id !== RoadType.Rail
+  (r) => !r.allowedOnWater && r.id !== RoadType.Rail && r.id !== RoadType.Connector
 );
+
+export interface RoadProperties {
+  lanesPerDirection: number;
+  totalLanes: number;
+  widthClass: 'narrow' | 'medium' | 'wide' | 'highway';
+  heavyTruckFriendly: boolean;
+  supportsSignals: boolean;
+}
+
+export function getRoadProperties(roadType: RoadType): RoadProperties {
+  switch (roadType) {
+    case RoadType.Dirt:
+    case RoadType.SmallRoad:
+      return { lanesPerDirection: 1, totalLanes: 1, widthClass: 'narrow', heavyTruckFriendly: false, supportsSignals: false };
+    case RoadType.Gravel:
+    case RoadType.Stone:
+    case RoadType.Bridge:
+    case RoadType.ParkingLot:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'narrow', heavyTruckFriendly: false, supportsSignals: false };
+    case RoadType.ResidentialRoad:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: false, supportsSignals: false };
+    case RoadType.TwoLane:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.ThreeLane:
+      return { lanesPerDirection: 2, totalLanes: 3, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.Connector:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
+    case RoadType.IndustrialRoad:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.Roundabout:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: false };
+    case RoadType.Paved:
+    case RoadType.FourLane:
+    case RoadType.CommercialBlvd:
+    case RoadType.UndergroundRoad:
+      return { lanesPerDirection: 2, totalLanes: 4, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.SixLane:
+      return { lanesPerDirection: 3, totalLanes: 6, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.EightLane:
+    case RoadType.Highway:
+    case RoadType.Expressway:
+    case RoadType.ElevatedHighway:
+      return { lanesPerDirection: 4, totalLanes: 8, widthClass: 'highway', heavyTruckFriendly: true, supportsSignals: true };
+    case RoadType.Interchange:
+      return { lanesPerDirection: 4, totalLanes: 8, widthClass: 'highway', heavyTruckFriendly: true, supportsSignals: false };
+    case RoadType.Rail:
+      return { lanesPerDirection: 1, totalLanes: 1, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
+    default:
+      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
+  }
+}
+

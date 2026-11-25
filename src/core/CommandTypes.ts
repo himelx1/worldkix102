@@ -2,7 +2,7 @@ import type { BuildingCategory } from '../data/buildings.data';
 import type { PolicyId } from '../data/policies.data';
 import type { ResourceId } from '../data/resources.data';
 import type { RoadType } from '../data/roads.data';
-import type { AutoTradeRule, GameSettings, GameSpeed, UtilityFlag, ZoneType } from './GameState';
+import type { AutoTradeRule, GameSettings, GameSpeed, RoadDirection, UtilityFlag, ZoneType } from './GameState';
 
 export type GameCommand =
   | { type: 'CHOP_TILE'; gx: number; gy: number; isManualTap: boolean }
@@ -15,6 +15,7 @@ export type GameCommand =
   | { type: 'MOVE_BUILDING'; buildingId: number; gx: number; gy: number; rotation?: 0 | 1 }
   | { type: 'PLACE_ROAD'; roadType: RoadType; gx: number; gy: number }
   | { type: 'REMOVE_ROAD'; gx: number; gy: number }
+  | { type: 'SET_ROAD_DIRECTION'; gx: number; gy: number; direction: RoadDirection }
   | { type: 'UPGRADE_BUILDING'; buildingId: number }
   | { type: 'UPGRADE_BLUEPRINT'; defId: string }
   | { type: 'DEMOLISH_BUILDING'; buildingId: number }

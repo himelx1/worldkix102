@@ -33,8 +33,15 @@ export class WorkforceSystem {
   }
 
   public assignWorkers(state: WorldEngineState, workerStrainReduction = 0): void {
-    let availableTotal = state.population.total;
+    const total = Math.max(0, Math.floor(state.population.total));
+    const children = total > 0 ? Math.floor(total * 0.12) : 0;
+    const underage = total > 0 ? Math.floor(total * 0.1) : 0;
+    const elderly = total > 0 ? Math.floor(total * 0.1) : 0;
+    const availableWorkforce = Math.max(0, total - children - underage - elderly);
+
+    let availableTotal = availableWorkforce;
     let employed = 0;
+    let totalJobs = 0;
 
     // Reset assignments first
     for (const b of state.buildings) {
@@ -44,6 +51,10 @@ export class WorkforceSystem {
     const activeBuildings = state.buildings.filter(
       (b) => b.status !== 'constructing' && b.enabled && (BUILDINGS[b.defId]?.maxWorkers ?? 0) > 0
     );
+
+    for (const b of activeBuildings) {
+      totalJobs += this.getEffectiveMaxWorkers(b, workerStrainReduction);
+    }
 
     const emergencyActive = (state.emergencyWorkTicksRemaining ?? 0) > 0;
 
@@ -96,8 +107,12 @@ export class WorkforceSystem {
       }
     }
 
+    state.population.availableWorkforce = availableWorkforce;
+    state.population.totalJobs = totalJobs;
+    state.population.occupiedJobs = employed;
+    state.population.vacantJobs = Math.max(0, totalJobs - employed);
     state.population.employed = employed;
-    state.population.unemployed = Math.max(0, state.population.total - employed);
+    state.population.unemployed = Math.max(0, availableWorkforce - employed);
   }
 
   public getWorkerEfficiency(b: BuildingInstance, state: WorldEngineState, workerStrainReduction = 0): number {

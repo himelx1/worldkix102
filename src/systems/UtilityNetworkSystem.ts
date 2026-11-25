@@ -139,6 +139,7 @@ export class UtilityNetworkSystem {
     const powerTileNet = new Map<string, number>();
     const powerGenByNet = new Map<number, number>();
     const powerDemByNet = new Map<number, number>();
+    const powerDistCapByNet = new Map<number, number>();
     const visitedPowerBuildings = new Set<number>();
     let nextPowerNetId = 1;
 
@@ -151,14 +152,19 @@ export class UtilityNetworkSystem {
     const getEffectivePowerOutput = (b: BuildingInstance): number => {
       const def = BUILDINGS[b.defId];
       if (!def?.powerOutput || !b.enabled) return 0;
+      if (def.minWorkers > 0 && b.assignedWorkers < def.minWorkers) return 0;
       const lvl = getBuildingLevelMultiplier(b.level, def);
       let p = def.powerOutput * lvl;
       if (b.defId === 'wind_turbine') p *= climate.windPowerMult;
       if (b.defId === 'solar_array') p *= climate.solarPowerMult;
-      if (b.defId === 'coal_power_plant') {
-        if (b.assignedWorkers < def.minWorkers || state.resources.coal < 1) return 0;
-      }
+      if (b.defId === 'coal_power_plant' && state.resources.coal < 1) return 0;
       return Math.round(p);
+    };
+
+    const getScaledPowerDemand = (b: BuildingInstance): number => {
+      const def = BUILDINGS[b.defId];
+      if (!def?.powerDemand || !b.enabled) return 0;
+      return Math.round(def.powerDemand * getBuildingLevelMultiplier(b.level, def));
     };
 
     for (const src of powerSources) {
@@ -166,6 +172,9 @@ export class UtilityNetworkSystem {
       const netId = nextPowerNetId++;
       let netGen = 0;
       let netDem = 0;
+      let netTiles = 0;
+      let netSubstations = 0;
+      let netSources = 0;
 
       const queue: Array<{ gx: number; gy: number }> = [];
       const enqueuedTiles = new Set<string>();
@@ -177,11 +186,11 @@ export class UtilityNetworkSystem {
         b.powerNetworkId = netId;
         const def = BUILDINGS[b.defId];
         if (!def) return;
+        if (def.powerOutput && def.powerOutput > 0) netSources++;
         netGen += getEffectivePowerOutput(b);
-        if (def.powerDemand && b.enabled) netDem += def.powerDemand;
+        netDem += getScaledPowerDemand(b);
 
         const fp = getBuildingFootprint(def, b.rotation ?? 0);
-        // Building taps utility lines on or orthogonally adjacent to its footprint, plus local 3-tile generator aura
         const aura = def.powerOutput ? 3 : 1;
         for (let dx = -aura; dx < fp.width + aura; dx++) {
           for (let dy = -aura; dy < fp.height + aura; dy++) {
@@ -189,7 +198,6 @@ export class UtilityNetworkSystem {
             const ty = b.gy + dy;
             const tk = `${tx}:${ty}`;
             if (enqueuedTiles.has(tk)) continue;
-            // Direct footprint overlap or orthogonal 1-tile adjacency taps PowerLine or other nearby buildings inside generator aura
             const inFootprint = dx >= 0 && dx < fp.width && dy >= 0 && dy < fp.height;
             const orthoBorder =
               ((dx === -1 || dx === fp.width) && dy >= 0 && dy < fp.height) ||
@@ -211,14 +219,16 @@ export class UtilityNetworkSystem {
         const cur = queue.pop()!;
         const ck = `${cur.gx}:${cur.gy}`;
         if (!powerTileNet.has(ck)) powerTileNet.set(ck, netId);
+        if (powerTiles.has(ck)) {
+          netTiles++;
+          if (substationCenters.some((s) => s.gx === cur.gx && s.gy === cur.gy)) netSubstations++;
+        }
 
-        // Spread through buildings touching this tile
         const bList = tileToBuilding.get(ck);
         if (bList) {
           for (const nb of bList) addBuildingToPowerNet(nb);
         }
 
-        // Spread along orthogonal PowerLine tiles & neighboring buildings touching PowerLine tiles
         if (powerTiles.has(ck)) {
           for (const [dx, dy] of DIRS) {
             const nx = cur.gx + dx;
@@ -229,7 +239,6 @@ export class UtilityNetworkSystem {
               queue.push({ gx: nx, gy: ny });
             }
           }
-          // Substations distribute power wirelessly in a 5-tile Manhattan radius
           if (substationCenters.some((s) => s.gx === cur.gx && s.gy === cur.gy)) {
             for (let rx = -5; rx <= 5; rx++) {
               for (let ry = -5; ry <= 5; ry++) {
@@ -247,51 +256,94 @@ export class UtilityNetworkSystem {
 
       powerGenByNet.set(netId, netGen);
       powerDemByNet.set(netId, netDem);
+      const distCap = Math.max(80, netTiles * 12 + netSubstations * 85 + netSources * 80);
+      powerDistCapByNet.set(netId, distCap);
     }
 
-    // Mark disconnected buildings cleanly & set per-network satisfaction
+    // Secondary connectivity check to distinguish "not connected to any lines" vs "connected to line section lacking a generator"
+    const hasAnyPowerLineNeighbor = (b: BuildingInstance): boolean => {
+      const def = BUILDINGS[b.defId];
+      if (!def) return false;
+      const fp = getBuildingFootprint(def, b.rotation ?? 0);
+      for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          const tk = `${b.gx + dx}:${b.gy + dy}`;
+          if (powerTiles.has(tk)) return true;
+        }
+      }
+      return substationCenters.some(
+        (s) => Math.abs(s.gx - b.gx) + Math.abs(s.gy - b.gy) <= 5
+      );
+    };
+
     let totalPowerGen = 0;
+    let totalPowerDelivered = 0;
     let totalPowerDem = 0;
     let pConn = 0;
     let pDisc = 0;
     let pBrownout = 0;
 
-    for (const g of powerGenByNet.values()) totalPowerGen += g;
+    for (const src of powerSources) totalPowerGen += getEffectivePowerOutput(src);
 
     for (const b of state.buildings) {
       if (b.status === 'constructing') continue;
-      const def = BUILDINGS[b.defId];
-      if (!def) continue;
+      const dem = getScaledPowerDemand(b);
+      if (!b.enabled) {
+        b.powerConnected = visitedPowerBuildings.has(b.id);
+        b.powerSatisfaction = dem > 0 ? 0 : 1;
+        b.powerReason = 'ok';
+        continue;
+      }
 
       if (!visitedPowerBuildings.has(b.id)) {
         b.powerConnected = false;
         b.powerNetworkId = 0;
-        b.powerSatisfaction = def.powerDemand ? 0 : 1;
-        if (def.powerDemand && b.enabled) {
-          totalPowerDem += def.powerDemand;
+        b.powerSatisfaction = dem > 0 ? 0 : 1;
+        b.powerReason =
+          dem > 0
+            ? hasAnyPowerLineNeighbor(b)
+              ? 'disconnected_section_no_source'
+              : 'not_connected_to_network'
+            : 'ok';
+        if (dem > 0) {
+          totalPowerDem += dem;
           pDisc++;
         }
       } else {
         const netId = b.powerNetworkId ?? 0;
         const g = powerGenByNet.get(netId) ?? 0;
         const d = powerDemByNet.get(netId) ?? 0;
-        const sat = d === 0 ? 1 : g >= d ? 1 : Math.max(0.2, g / Math.max(1, d));
+        const distCap = powerDistCapByNet.get(netId) ?? 999999;
+        const effectiveCap = Math.min(g, distCap);
+        const sat = d === 0 ? 1 : g <= 0 ? 0 : Math.min(1, effectiveCap / d);
         b.powerSatisfaction = sat;
-        if (def.powerDemand && b.enabled) {
-          totalPowerDem += def.powerDemand;
+        if (dem > 0) {
+          totalPowerDem += dem;
+          totalPowerDelivered += Math.round(dem * sat);
           pConn++;
           if (sat < 1) pBrownout++;
+        }
+        if (sat >= 1 || dem === 0) {
+          b.powerReason = 'ok';
+        } else if (g <= 0) {
+          b.powerReason = 'source_inactive';
+        } else if (g > distCap && d > distCap) {
+          b.powerReason = 'distribution_overloaded';
+        } else {
+          b.powerReason = 'insufficient_supply';
         }
       }
     }
 
     state.powerGenerated = totalPowerGen;
+    state.powerDelivered = totalPowerDelivered;
     state.powerDemand = totalPowerDem;
 
     // --- 2. WATER NETWORK FLOOD FILL ---
     const visitedWaterBuildings = new Set<number>();
     const waterGenByNet = new Map<number, number>();
     const waterDemByNet = new Map<number, number>();
+    const waterDistCapByNet = new Map<number, number>();
     let nextWaterNetId = 1;
 
     const waterSources = state.buildings.filter((b) => {
@@ -300,11 +352,31 @@ export class UtilityNetworkSystem {
       return Boolean(def?.waterOutput && def.waterOutput > 0);
     });
 
+    const getEffectiveWaterOutput = (b: BuildingInstance): number => {
+      const def = BUILDINGS[b.defId];
+      if (!def?.waterOutput || !b.enabled) return 0;
+      if (def.minWorkers > 0 && b.assignedWorkers < def.minWorkers) return 0;
+      return Math.round(def.waterOutput * getBuildingLevelMultiplier(b.level, def));
+    };
+
+    const waterPolicyCut = state.activePolicies?.includes('eco_water_pact') ? 0.75 : 1.0;
+    const getScaledWaterDemand = (b: BuildingInstance): number => {
+      const def = BUILDINGS[b.defId];
+      if (!def?.waterDemand || !b.enabled) return 0;
+      return Math.max(
+        1,
+        Math.round(def.waterDemand * getBuildingLevelMultiplier(b.level, def) * climate.waterDemandMult * waterPolicyCut)
+      );
+    };
+
     for (const src of waterSources) {
       if (visitedWaterBuildings.has(src.id)) continue;
       const netId = nextWaterNetId++;
       let netGen = 0;
       let netDem = 0;
+      let netTiles = 0;
+      let netPumps = 0;
+      let netSources = 0;
       const queue: Array<{ gx: number; gy: number }> = [];
       const enqueued = new Set<string>();
 
@@ -315,12 +387,11 @@ export class UtilityNetworkSystem {
         b.waterNetworkId = netId;
         const def = BUILDINGS[b.defId];
         if (!def) return;
-        const lvl = getBuildingLevelMultiplier(b.level, def);
-        if (def.waterOutput && b.enabled) netGen += Math.round(def.waterOutput * lvl);
-        if (def.waterDemand && b.enabled) netDem += Math.round(def.waterDemand * climate.waterDemandMult);
+        if (def.waterOutput && def.waterOutput > 0) netSources++;
+        netGen += getEffectiveWaterOutput(b);
+        netDem += getScaledWaterDemand(b);
 
         const fp = getBuildingFootprint(def, b.rotation ?? 0);
-        // Wells & water sources serve a natural 4-tile local radius; pipes extend indefinitely
         const aura = def.waterOutput ? 4 : 1;
         for (let dx = -aura; dx < fp.width + aura; dx++) {
           for (let dy = -aura; dy < fp.height + aura; dy++) {
@@ -348,6 +419,11 @@ export class UtilityNetworkSystem {
       while (queue.length > 0) {
         const cur = queue.pop()!;
         const ck = `${cur.gx}:${cur.gy}`;
+        if (waterTiles.has(ck)) {
+          netTiles++;
+          if (pumpCenters.some((p) => p.gx === cur.gx && p.gy === cur.gy)) netPumps++;
+        }
+
         const bList = tileToBuilding.get(ck);
         if (bList) {
           for (const nb of bList) addBuildingToWaterNet(nb);
@@ -378,36 +454,88 @@ export class UtilityNetworkSystem {
 
       waterGenByNet.set(netId, netGen);
       waterDemByNet.set(netId, netDem);
+      const distCap = Math.max(80, netTiles * 12 + netPumps * 85 + netSources * 80);
+      waterDistCapByNet.set(netId, distCap);
     }
 
+    const hasAnyWaterPipeNeighbor = (b: BuildingInstance): boolean => {
+      const def = BUILDINGS[b.defId];
+      if (!def) return false;
+      const fp = getBuildingFootprint(def, b.rotation ?? 0);
+      for (let dx = -1; dx <= fp.width; dx++) {
+        for (let dy = -1; dy <= fp.height; dy++) {
+          const tk = `${b.gx + dx}:${b.gy + dy}`;
+          if (waterTiles.has(tk)) return true;
+        }
+      }
+      return pumpCenters.some(
+        (p) => Math.abs(p.gx - b.gx) + Math.abs(p.gy - b.gy) <= 5
+      );
+    };
+
+    let totalWaterGen = 0;
+    let totalWaterDelivered = 0;
+    let totalWaterDem = 0;
     let wConn = 0;
     let wDisc = 0;
     let wShortage = 0;
 
+    for (const src of waterSources) totalWaterGen += getEffectiveWaterOutput(src);
+
     for (const b of state.buildings) {
       if (b.status === 'constructing') continue;
-      const def = BUILDINGS[b.defId];
-      if (!def) continue;
+      const dem = getScaledWaterDemand(b);
+      if (!b.enabled) {
+        b.waterConnected = visitedWaterBuildings.has(b.id);
+        b.waterSatisfaction = dem > 0 ? 0 : 1;
+        b.waterReason = 'ok';
+        continue;
+      }
 
       if (!visitedWaterBuildings.has(b.id)) {
         b.waterConnected = false;
         b.waterNetworkId = 0;
-        b.waterSatisfaction = def.waterDemand ? 0 : 1;
-        if (def.waterDemand && b.enabled) wDisc++;
+        b.waterSatisfaction = dem > 0 ? 0 : 1;
+        b.waterReason =
+          dem > 0
+            ? hasAnyWaterPipeNeighbor(b)
+              ? 'disconnected_section_no_source'
+              : 'not_connected_to_network'
+            : 'ok';
+        if (dem > 0) {
+          totalWaterDem += dem;
+          wDisc++;
+        }
       } else {
         const netId = b.waterNetworkId ?? 0;
         const g = waterGenByNet.get(netId) ?? 0;
         const d = waterDemByNet.get(netId) ?? 0;
-        const sat = d === 0 ? 1 : g >= d ? 1 : Math.max(0.2, g / Math.max(1, d));
+        const distCap = waterDistCapByNet.get(netId) ?? 999999;
+        const effectiveCap = Math.min(g, distCap);
+        const sat = d === 0 ? 1 : g <= 0 ? 0 : Math.min(1, effectiveCap / d);
         b.waterSatisfaction = sat;
-        if (def.waterDemand && b.enabled) {
+        if (dem > 0) {
+          totalWaterDem += dem;
+          totalWaterDelivered += Math.round(dem * sat);
           wConn++;
           if (sat < 1) wShortage++;
+        }
+        if (sat >= 1 || dem === 0) {
+          b.waterReason = 'ok';
+        } else if (g <= 0) {
+          b.waterReason = 'source_inactive';
+        } else if (g > distCap && d > distCap) {
+          b.waterReason = 'distribution_overloaded';
+        } else {
+          b.waterReason = 'insufficient_supply';
         }
       }
     }
 
-    // Ensure tile grid chunk coords remain valid even when no pipes placed
+    state.waterGenerated = totalWaterGen;
+    state.waterDelivered = totalWaterDelivered;
+    state.waterDemand = totalWaterDem;
+
     void gridToChunk;
     state.utilitySummary = {
       powerConnectedCount: pConn,
