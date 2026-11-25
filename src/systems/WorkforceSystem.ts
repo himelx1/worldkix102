@@ -34,10 +34,16 @@ export class WorkforceSystem {
 
   public assignWorkers(state: WorldEngineState, workerStrainReduction = 0): void {
     const total = Math.max(0, Math.floor(state.population.total));
-    const children = total > 0 ? Math.floor(total * 0.12) : 0;
-    const underage = total > 0 ? Math.floor(total * 0.1) : 0;
-    const elderly = total > 0 ? Math.floor(total * 0.1) : 0;
-    const availableWorkforce = Math.max(0, total - children - underage - elderly);
+    // Workforce must come from the real age cohorts maintained by
+    // CitizenAccounting, never from a second independent guess.
+    const age = state.population.ageBreakdown;
+    const children = age?.child ?? (total > 0 ? Math.floor(total * 0.12) : 0);
+    const underage = age?.underage ?? (total > 0 ? Math.floor(total * 0.1) : 0);
+    const elderly = age?.elderly ?? (total > 0 ? Math.floor(total * 0.1) : 0);
+    const availableWorkforce = Math.max(
+      0,
+      age?.adult !== undefined ? age.adult : total - children - underage - elderly
+    );
 
     let availableTotal = availableWorkforce;
     let employed = 0;
@@ -107,12 +113,15 @@ export class WorkforceSystem {
       }
     }
 
+    // Jobs available = all positions the city has built. Occupied + vacant must
+    // always add back to it so the UI can never show a phantom shortage.
+    const realEmployed = Math.min(availableWorkforce, employed);
     state.population.availableWorkforce = availableWorkforce;
     state.population.totalJobs = totalJobs;
-    state.population.occupiedJobs = employed;
-    state.population.vacantJobs = Math.max(0, totalJobs - employed);
-    state.population.employed = employed;
-    state.population.unemployed = Math.max(0, availableWorkforce - employed);
+    state.population.occupiedJobs = realEmployed;
+    state.population.vacantJobs = Math.max(0, totalJobs - realEmployed);
+    state.population.employed = realEmployed;
+    state.population.unemployed = Math.max(0, availableWorkforce - realEmployed);
   }
 
   public getWorkerEfficiency(b: BuildingInstance, state: WorldEngineState, workerStrainReduction = 0): number {

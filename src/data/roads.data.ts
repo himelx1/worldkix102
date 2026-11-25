@@ -419,54 +419,385 @@ export const ROAD_UPGRADE_TIERS: RoadDef[] = BUILDABLE_ROADS.filter(
   (r) => !r.allowedOnWater && r.id !== RoadType.Rail && r.id !== RoadType.Connector
 );
 
+/**
+ * Logical road classification used by layer 1 (connectivity) and layer 2 (traffic).
+ * These classes must never be derived from *rendered* lane geometry: they are stable
+ * metadata attached to each road definition.
+ */
+export type RoadClass =
+  | 'local' // dirt / small / gravel farm tracks
+  | 'residential' // residential streets: light vehicles only
+  | 'secondary' // two/three lane connectors
+  | 'main' // paved / boulevards / industrial arterials
+  | 'highway' // highways, expressways, interchanges
+  | 'special'; // roundabouts, parking, bridges, interchanges, connectors
+
 export interface RoadProperties {
   lanesPerDirection: number;
   totalLanes: number;
   widthClass: 'narrow' | 'medium' | 'wide' | 'highway';
   heavyTruckFriendly: boolean;
   supportsSignals: boolean;
+  /** Logical class (independent of visual width) */
+  roadClass: RoadClass;
+  /** Structural traffic capacity in vehicles per in-game hour. */
+  capacityPerHour: number;
+  /** Base structural quality 0..1 (condition independent of maintenance). */
+  qualityBase: number;
+  /** Speed penalty multiplier applied when a heavy truck is forced onto this road. */
+  heavyTruckSpeedPenalty: number;
+  /** Maximum vehicle class that may legally use this road. */
+  maxVehicleClass: 'car' | 'van' | 'heavy_truck';
+  /** True when this road should carry utility trunk paths without width penalties. */
+  utilityTrunk: boolean;
 }
 
+const ROAD_PROPS: Record<number, RoadProperties> = {
+  [RoadType.None]: {
+    lanesPerDirection: 1,
+    totalLanes: 1,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'local',
+    capacityPerHour: 0,
+    qualityBase: 0,
+    heavyTruckSpeedPenalty: 1,
+    maxVehicleClass: 'car',
+    utilityTrunk: false,
+  },
+  [RoadType.Dirt]: {
+    lanesPerDirection: 1,
+    totalLanes: 1,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'local',
+    capacityPerHour: 36,
+    qualityBase: 0.45,
+    heavyTruckSpeedPenalty: 0.55,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.SmallRoad]: {
+    lanesPerDirection: 1,
+    totalLanes: 1,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'local',
+    capacityPerHour: 48,
+    qualityBase: 0.5,
+    heavyTruckSpeedPenalty: 0.6,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.Gravel]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'local',
+    capacityPerHour: 70,
+    qualityBase: 0.6,
+    heavyTruckSpeedPenalty: 0.7,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.Stone]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'local',
+    capacityPerHour: 90,
+    qualityBase: 0.72,
+    heavyTruckSpeedPenalty: 0.78,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.Bridge]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'special',
+    capacityPerHour: 80,
+    qualityBase: 0.8,
+    heavyTruckSpeedPenalty: 0.8,
+    maxVehicleClass: 'van',
+    utilityTrunk: true,
+  },
+  [RoadType.ParkingLot]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'narrow',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'special',
+    capacityPerHour: 40,
+    qualityBase: 0.7,
+    heavyTruckSpeedPenalty: 0.85,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.ResidentialRoad]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'medium',
+    heavyTruckFriendly: false,
+    supportsSignals: false,
+    roadClass: 'residential',
+    capacityPerHour: 110,
+    qualityBase: 0.78,
+    heavyTruckSpeedPenalty: 0.68,
+    maxVehicleClass: 'van',
+    utilityTrunk: false,
+  },
+  [RoadType.TwoLane]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'medium',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'secondary',
+    capacityPerHour: 190,
+    qualityBase: 0.84,
+    heavyTruckSpeedPenalty: 0.9,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.ThreeLane]: {
+    lanesPerDirection: 2,
+    totalLanes: 3,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'secondary',
+    capacityPerHour: 250,
+    qualityBase: 0.86,
+    heavyTruckSpeedPenalty: 0.92,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Connector]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'medium',
+    heavyTruckFriendly: true,
+    supportsSignals: false,
+    roadClass: 'special',
+    capacityPerHour: 120,
+    qualityBase: 0.75,
+    heavyTruckSpeedPenalty: 0.88,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.IndustrialRoad]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'medium',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 300,
+    qualityBase: 0.88,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Roundabout]: {
+    lanesPerDirection: 1,
+    totalLanes: 2,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: false,
+    roadClass: 'special',
+    capacityPerHour: 260,
+    qualityBase: 0.86,
+    heavyTruckSpeedPenalty: 0.95,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Paved]: {
+    lanesPerDirection: 2,
+    totalLanes: 4,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 420,
+    qualityBase: 0.92,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.FourLane]: {
+    lanesPerDirection: 2,
+    totalLanes: 4,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 460,
+    qualityBase: 0.92,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.CommercialBlvd]: {
+    lanesPerDirection: 2,
+    totalLanes: 4,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 440,
+    qualityBase: 0.93,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.UndergroundRoad]: {
+    lanesPerDirection: 2,
+    totalLanes: 4,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 480,
+    qualityBase: 0.95,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.SixLane]: {
+    lanesPerDirection: 3,
+    totalLanes: 6,
+    widthClass: 'wide',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'main',
+    capacityPerHour: 680,
+    qualityBase: 0.94,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.EightLane]: {
+    lanesPerDirection: 4,
+    totalLanes: 8,
+    widthClass: 'highway',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'highway',
+    capacityPerHour: 900,
+    qualityBase: 0.96,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Highway]: {
+    lanesPerDirection: 4,
+    totalLanes: 8,
+    widthClass: 'highway',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'highway',
+    capacityPerHour: 950,
+    qualityBase: 0.97,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Expressway]: {
+    lanesPerDirection: 4,
+    totalLanes: 8,
+    widthClass: 'highway',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'highway',
+    capacityPerHour: 1100,
+    qualityBase: 0.98,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.ElevatedHighway]: {
+    lanesPerDirection: 4,
+    totalLanes: 8,
+    widthClass: 'highway',
+    heavyTruckFriendly: true,
+    supportsSignals: true,
+    roadClass: 'highway',
+    capacityPerHour: 1200,
+    qualityBase: 0.99,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Interchange]: {
+    lanesPerDirection: 4,
+    totalLanes: 8,
+    widthClass: 'highway',
+    heavyTruckFriendly: true,
+    supportsSignals: false,
+    roadClass: 'highway',
+    capacityPerHour: 1300,
+    qualityBase: 0.99,
+    heavyTruckSpeedPenalty: 1.0,
+    maxVehicleClass: 'heavy_truck',
+    utilityTrunk: true,
+  },
+  [RoadType.Rail]: {
+    lanesPerDirection: 1,
+    totalLanes: 1,
+    widthClass: 'medium',
+    heavyTruckFriendly: true,
+    supportsSignals: false,
+    roadClass: 'special',
+    capacityPerHour: 0,
+    qualityBase: 0.9,
+    heavyTruckSpeedPenalty: 0,
+    maxVehicleClass: 'car',
+    utilityTrunk: false,
+  },
+};
+
 export function getRoadProperties(roadType: RoadType): RoadProperties {
-  switch (roadType) {
-    case RoadType.Dirt:
-    case RoadType.SmallRoad:
-      return { lanesPerDirection: 1, totalLanes: 1, widthClass: 'narrow', heavyTruckFriendly: false, supportsSignals: false };
-    case RoadType.Gravel:
-    case RoadType.Stone:
-    case RoadType.Bridge:
-    case RoadType.ParkingLot:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'narrow', heavyTruckFriendly: false, supportsSignals: false };
-    case RoadType.ResidentialRoad:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: false, supportsSignals: false };
-    case RoadType.TwoLane:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.ThreeLane:
-      return { lanesPerDirection: 2, totalLanes: 3, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.Connector:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
-    case RoadType.IndustrialRoad:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.Roundabout:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: false };
-    case RoadType.Paved:
-    case RoadType.FourLane:
-    case RoadType.CommercialBlvd:
-    case RoadType.UndergroundRoad:
-      return { lanesPerDirection: 2, totalLanes: 4, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.SixLane:
-      return { lanesPerDirection: 3, totalLanes: 6, widthClass: 'wide', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.EightLane:
-    case RoadType.Highway:
-    case RoadType.Expressway:
-    case RoadType.ElevatedHighway:
-      return { lanesPerDirection: 4, totalLanes: 8, widthClass: 'highway', heavyTruckFriendly: true, supportsSignals: true };
-    case RoadType.Interchange:
-      return { lanesPerDirection: 4, totalLanes: 8, widthClass: 'highway', heavyTruckFriendly: true, supportsSignals: false };
-    case RoadType.Rail:
-      return { lanesPerDirection: 1, totalLanes: 1, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
+  return ROAD_PROPS[roadType] ?? ROAD_PROPS[RoadType.TwoLane];
+}
+
+/** Vehicle classes ordered from lightest to heaviest. */
+export const VEHICLE_CLASS_WEIGHT: Record<'car' | 'van' | 'heavy_truck', number> = {
+  car: 0,
+  van: 1,
+  heavy_truck: 2,
+};
+
+/** Normalised weight for any vehicle class name used by the traffic layer. */
+export function getVehicleWeight(vehicleClass: string): number {
+  switch (vehicleClass) {
+    case 'heavy_truck':
+      return 2;
+    case 'van':
+    case 'bus':
+      return 1;
     default:
-      return { lanesPerDirection: 1, totalLanes: 2, widthClass: 'medium', heavyTruckFriendly: true, supportsSignals: false };
+      return 0;
   }
+}
+
+/**
+ * Logical suitability test: can this vehicle class legally use the road?
+ * This is a *connectivity* rule (layer 1) and must not depend on how the road renders.
+ */
+export function isRoadAllowedForVehicle(roadType: RoadType, vehicleClass: string): boolean {
+  const props = getRoadProperties(roadType);
+  if (roadType === RoadType.None || roadType === RoadType.Rail) return false;
+  return VEHICLE_CLASS_WEIGHT[props.maxVehicleClass] >= getVehicleWeight(vehicleClass);
 }
 

@@ -347,13 +347,21 @@ export class CitizenSystem {
       const road = curTile.chunk.roadType[curTile.index] as RoadType;
       const targetTile = chunks.getTile(Math.round(agent.targetGx), Math.round(agent.targetGy));
       const targetRoad = targetTile.chunk.roadType[targetTile.index] as RoadType;
+      // Pedestrian / vehicle separation (layer 2 interaction):
+      // people walk on the sidewalk offset used by the renderer, and they never
+      // step into a tile that a moving vehicle currently occupies.
       if (
         occupiedVehicleTiles &&
         targetRoad !== RoadType.None &&
         targetRoad !== RoadType.Rail &&
         occupiedVehicleTiles.has(`${Math.round(agent.targetGx)}:${Math.round(agent.targetGy)}`)
       ) {
-        // Yield briefly on sidewalk/curb until vehicle clears the tile
+        // Yield on the curb until the vehicle clears the lane.
+        return;
+      }
+      if (road !== RoadType.None && occupiedVehicleTiles?.has(`${Math.round(agent.gx)}:${Math.round(agent.gy)}`)) {
+        // Vehicles never share the pedestrian curb: hold position on the
+        // sidewalk instead of walking through the moving vehicle.
         return;
       }
       const roadBoost = road !== RoadType.None ? Math.min(1.85, ROADS[road]?.speedMultiplier ?? 1.1) : 1.0;

@@ -164,10 +164,12 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
           {/* Automated Logging Center Dedicated Readout & Forest Permit Button */}
           {def.isAutomatedLogging ? (() => {
             const trucks = GameController.engine.logistics.loggingTrucks.filter((t) => t.factoryId === b.id);
-            const drivingCount = trucks.filter((t) => t.state === 'to_forest' || t.state === 'to_factory' || t.state === 'delivering_sawmill').length;
-            const choppingCount = trucks.filter((t) => t.state === 'worker_chopping').length;
+            const fleet = b.fleet ?? GameController.engine.logistics.forestryFleet.getFleetSummary(b.id, snap.state);
+            const drivingCount = fleet.active;
+            const choppingCount = trucks.filter((t) => t.state === 'crew_working').length;
             const blockedTrucks = trucks.filter((t) => t.state === 'blocked');
             const firstBlockedReason = blockedTrucks[0]?.statusReason;
+            const firstFailureCode = blockedTrucks[0]?.failureCode;
             return (
               <div className="p-3 rounded-xl bg-[#091c12] border border-lime-600/50 space-y-2 text-xs tabular-nums">
                 <div className="flex items-center justify-between font-bold text-lime-300">
@@ -194,16 +196,43 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
                     <strong className="text-emerald-300">{logStats.permittedForestTiles}</strong>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 text-[11px] px-2 py-1.5 rounded-lg bg-[#06120c] border border-emerald-900/50">
-                  <span className="text-sky-300">Driving: <strong>{drivingCount}</strong></span>
-                  <span className="text-lime-300">Workers Harvesting: <strong>{choppingCount}</strong></span>
-                  <span className={blockedTrucks.length > 0 ? 'text-amber-300' : 'text-stone-400'}>
-                    Blocked: <strong>{blockedTrucks.length}</strong>
-                  </span>
+                <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Total</span>{' '}
+                    <strong className="text-stone-100">{fleet.total}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Ready</span>{' '}
+                    <strong className="text-emerald-300">{fleet.available}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Active</span>{' '}
+                    <strong className="text-sky-300">{drivingCount}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Loaded</span>{' '}
+                    <strong className="text-lime-300">{fleet.cargo}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Returning</span>{' '}
+                    <strong className="text-cyan-300">{fleet.returning}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded-lg bg-[#06120c] border border-emerald-900/50">
+                    <span className="text-stone-400">Crews</span>{' '}
+                    <strong className="text-lime-300">{choppingCount}</strong>
+                  </div>
                 </div>
+                {fleet.destinations.length > 0 ? (
+                  <div className="text-[11px] text-sky-200 truncate">
+                    Destinations: {fleet.destinations.join(', ')}
+                  </div>
+                ) : null}
                 {firstBlockedReason ? (
                   <div className="text-[11px] text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded-lg px-2.5 py-1.5">
-                    {firstBlockedReason}
+                    <div>{firstBlockedReason}</div>
+                    {firstFailureCode ? (
+                      <div className="text-[10px] text-amber-200/80 mt-0.5">Code: {firstFailureCode}</div>
+                    ) : null}
                   </div>
                 ) : null}
                 <button
@@ -272,6 +301,23 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
                   <div className="font-bold text-amber-300">{Math.round(b.realizedOutputTotal ?? 0)}</div>
                 </div>
               </div>
+              {def.recipe && Object.keys(def.recipe.outputs).length > 0 ? (
+                <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10px] text-cyan-200">
+                  <span className="text-stone-400">Outputs/cycle:</span>
+                  {Object.entries(def.recipe.outputs).map(([k, v]) => {
+                    const cap = snap.state.capacities[k as ResourceId] ?? 0;
+                    const have = Math.floor(snap.state.resources[k as ResourceId] ?? 0);
+                    const full = cap > 0 && have >= cap * 0.98;
+                    return (
+                      <span key={k} className={full ? 'text-red-300 font-semibold' : undefined}>
+                        {v} {RESOURCES[k as ResourceId]?.name ?? k}
+                        {cap > 0 ? ` · stored ${have}/${Math.round(cap)}` : ''}
+                        {full ? ' · STORAGE FULL' : ''}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
               {def.recipe && Object.keys(def.recipe.inputs).length > 0 ? (
                 <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10px]">
                   {Object.entries(def.recipe.inputs).map(([k, needRaw]) => {
@@ -280,6 +326,7 @@ export const SelectionPanels: React.FC<{ snap: GameSnapshot }> = ({ snap }) => {
                     return (
                       <span key={k} className={have >= need ? 'text-emerald-300' : 'text-red-300 font-semibold'}>
                         {RESOURCES[k as ResourceId]?.name ?? k}: {have}/{need}
+                        {have >= need ? ' ✓' : ' MISSING'}
                       </span>
                     );
                   })}

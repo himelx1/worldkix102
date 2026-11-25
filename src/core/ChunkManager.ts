@@ -349,6 +349,25 @@ export class ChunkManager {
     return true;
   }
 
+  /** Tree lifecycle stage for a tile (0=empty,1=sapling,2=young,3=mature). */
+  public getFeatureStage(gx: number, gy: number): number {
+    const { chunk, index } = this.getTile(gx, gy);
+    const arr = chunk.featureStage;
+    if (!arr) return 0;
+    return arr[index] ?? 0;
+  }
+
+  public setFeatureStage(gx: number, gy: number, stage: number): void {
+    const { cx, cy, index } = gridToChunk(gx, gy);
+    const chunk = this.getOrCreateChunk(cx, cy);
+    if (!chunk.featureStage) {
+      chunk.featureStage = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+    }
+    if (chunk.featureStage[index] === stage) return;
+    chunk.featureStage[index] = stage;
+    this.markChunkModified(cx, cy);
+  }
+
   public getRoadDirection(gx: number, gy: number): RoadDirection {
     const { chunk, index } = this.getTile(gx, gy);
     return (chunk.roadDir?.[index] ?? RoadDirection.TwoWay) as RoadDirection;

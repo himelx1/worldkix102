@@ -1,6 +1,6 @@
-import { DepositType, FeatureType, TREE_SPECIES } from '../data/trees.data';
+import { DepositType, FeatureType, isTreeFeature, TREE_SPECIES } from '../data/trees.data';
 import { RoadType } from '../data/roads.data';
-import { BiomeId, ChunkData, TileFlag } from './GameState';
+import { BiomeId, ChunkData, TileFlag, TreeStage } from './GameState';
 import { CHUNK_SIZE, chunkKey, chunkToGrid, hashCoords, mulberry32 } from './IsoMath';
 
 export class WorldGenerator {
@@ -61,6 +61,7 @@ export class WorldGenerator {
     const cityRef = new Uint16Array(len);
     const zoneType = new Uint8Array(len);
     const roadDir = new Uint8Array(len);
+    const featureStage = new Uint8Array(len);
 
     for (let ly = 0; ly < CHUNK_SIZE; ly++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {
@@ -304,6 +305,14 @@ export class WorldGenerator {
           featureType[idx] = FeatureType.None;
           featureHp[idx] = 0;
         }
+
+        // Persisted lifecycle stage: worldgen forests start mature (harvestable),
+        // explicit saplings start at stage 1, everything else is empty ground.
+        if (featureType[idx] === FeatureType.Sapling) {
+          featureStage[idx] = TreeStage.Sapling;
+        } else if (isTreeFeature(featureType[idx] as FeatureType)) {
+          featureStage[idx] = TreeStage.Mature;
+        }
       }
     }
 
@@ -328,6 +337,7 @@ export class WorldGenerator {
       cityRef,
       zoneType,
       roadDir,
+      featureStage,
     };
   }
 }

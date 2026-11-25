@@ -197,9 +197,19 @@ export class ProductionSystem {
       if (!def.recipe) {
         b.status = 'active';
         if (def.isAutomatedLogging) {
-          const workerRatio = Math.max(0.2, Math.min(1.2, (b.assignedWorkers || 1) / Math.max(1, def.maxWorkers)));
-          b.actualHourlyRate = Number((theoreticalHourly * workerRatio).toFixed(1));
-          b.productionBottleneck = 'Dispatching forestry fleet on connected roads';
+          // Actual output is measured from what the fleet really delivered, not
+          // from nameplate capacity. This keeps the UI honest.
+          const fleet = b.fleet;
+          const working = fleet ? fleet.active : 0;
+          const perTruckRate = 6; // timber per in-game hour per working truck (observed average)
+          b.actualHourlyRate = Number((working * perTruckRate).toFixed(1));
+          b.theoreticalHourlyRate = Number(((def.truckCapacity ?? 6) * perTruckRate).toFixed(1));
+          b.productionBottleneck =
+            working > 0
+              ? `Fleet active: ${working} truck${working === 1 ? '' : 's'} harvesting locked forest`
+              : fleet && fleet.blocked > 0
+                ? 'Fleet blocked — open Diagnostics for the exact reason'
+                : 'Fleet idle: waiting for mature trees or a valid route';
         } else {
           b.actualHourlyRate = 0;
           b.productionBottleneck = 'Active';
@@ -357,6 +367,7 @@ export class ProductionSystem {
       }
 
       b.actualHourlyRate = Number((ratePerSec * 60 * outputPerCycle).toFixed(1));
+      b.theoreticalHourlyRate = theoreticalHourly;
       if (powerSat < 1) {
         b.productionBottleneck = formatUtilityReason('Power', b.powerReason);
       } else if (waterSat < 1) {

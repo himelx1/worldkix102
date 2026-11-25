@@ -139,6 +139,25 @@ export class SaveMigrator {
       landModeActive: Boolean(candidate.landModeActive),
       loggingStats: candidate.loggingStats ?? base.loggingStats,
       corporateStats: Array.isArray(candidate.corporateStats) ? candidate.corporateStats : [],
+      // --- v3 additions: persisted forestry work zones & diagnostics ---------
+      // Older saves had no work-zone registry. Rebuilding it here (rather than
+      // dropping it) means loaded games resume fleet scheduling immediately.
+      forestryWorkZones: Array.isArray(candidate.forestryWorkZones)
+        ? candidate.forestryWorkZones
+            .filter((z) => Number.isFinite(Number(z.gx)) && Number.isFinite(Number(z.gy)))
+            .map((z, i) => ({
+              id: typeof z.id === 'string' && z.id.length > 0 ? z.id : `zone_${i}`,
+              gx: Math.round(Number(z.gx)),
+              gy: Math.round(Number(z.gy)),
+              matureTrees: Math.max(0, Math.round(Number(z.matureTrees ?? 0))),
+              harvestedTotal: Math.max(0, Math.round(Number(z.harvestedTotal ?? 0))),
+              cooldownUntilTick: Math.max(0, Math.round(Number(z.cooldownUntilTick ?? 0))),
+              lastHarvestTick: Math.max(-1, Math.round(Number(z.lastHarvestTick ?? -1))),
+            }))
+        : [],
+      // Diagnostics are derived data; always start clean after a load so a stale
+      // snapshot from a previous session can never be shown.
+      networkDiagnostics: base.networkDiagnostics,
     };
 
     CitizenAccounting.reconcileCohorts(migrated);

@@ -31,6 +31,7 @@ import { RoadNetworkSystem } from '../systems/RoadNetworkSystem';
 import { TechSystem } from '../systems/TechSystem';
 import { WorkforceSystem } from '../systems/WorkforceSystem';
 import { CitizenSystem } from '../systems/CitizenSystem';
+import { NetworkDiagnosticsSystem } from '../systems/NetworkDiagnosticsSystem';
 import { UtilityNetworkSystem } from '../systems/UtilityNetworkSystem';
 import { DistrictServiceSystem } from '../systems/DistrictServiceSystem';
 import { PathfindingSystem } from '../systems/PathfindingSystem';
@@ -290,6 +291,12 @@ export class CoreEngine {
     savedState.powerDelivered ??= savedState.powerGenerated ?? 0;
     savedState.waterDelivered ??= savedState.waterGenerated ?? 0;
     savedState.treeRegrowthQueue ??= [];
+    savedState.forestryWorkZones ??= [];
+    // Normalise persisted lifecycle stages so older/partial saves keep working.
+    for (const entry of savedState.treeRegrowthQueue) {
+      if (!entry.stage) entry.stage = entry.harvested === false ? 'empty' : 'empty';
+      entry.stageStartedTick ??= savedState.tick;
+    }
     savedState.population.ageBreakdown ??= { child: 0, underage: 0, adult: 0, elderly: 0 };
     savedState.population.cohorts ??= [];
     savedState.settings.crowdDensity ??= 'auto';
@@ -445,7 +452,7 @@ export class CoreEngine {
       }
     }
     for (const lt of this.logistics.loggingTrucks) {
-      if (lt.onRoad && (lt.state === 'to_forest' || lt.state === 'to_factory' || lt.state === 'delivering_sawmill')) {
+      if (lt.onRoad && (lt.state === 'to_forest' || lt.state === 'to_factory' || lt.state === 'stockpiling')) {
         occupied.add(`${Math.round(lt.gx)}:${Math.round(lt.gy)}`);
       }
     }
@@ -553,6 +560,7 @@ export class CoreEngine {
     const climate = EnvironmentSystem.getClimateModifiers(this.state);
 
     this.forestry.tickRegrowth(this.chunks, this.state, climate.treeRegrowthMult);
+    this.forestry.plantAroundForesterHuts(this.state, this.chunks);
 
     this.buildingSys.tickConstruction(
       this.state,
@@ -590,6 +598,17 @@ export class CoreEngine {
       techMods,
       climate
     );
+
+    // Layer diagnostics run on a slow cadence; the UI reads the cached snapshot.
+    if (this.state.tick % 20 === 0) {
+      NetworkDiagnosticsSystem.build(
+        this.state,
+        this.chunks,
+        this.roadNet,
+        this.logistics.forestryFleet,
+        this.logistics.roadVehicles
+      );
+    }
 
     EnvironmentSystem.tickEnvironment(this.state, this.chunks, techMods.pollutionReduction);
     EconomySystem.tickEconomy(this.state);
